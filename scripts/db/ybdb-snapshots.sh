@@ -18,7 +18,7 @@ echo "------------------------------------------------"
 echo ""
 
 # Configuration file path
-CONFIG_FILE="/var/logs/config.cfg"
+CONFIG_FILE="/var/logs/.config.cfg"
 
 # Log settings (will be set after configuration)
 LOG_DIR=""
