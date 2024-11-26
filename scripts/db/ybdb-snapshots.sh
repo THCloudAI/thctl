@@ -104,8 +104,8 @@ else
 fi
 
 # Set log files after configuration
-LOG_FILE="${LOG_DIR}/snapshot_ybdb_$(date '+%Y%m%d%H').log"
-UUID_FILE="${LOG_DIR}/latest_snapshot_uuid"
+LOG_FILE="${LOG_DIR}/thc-ybdb-snapshot.log"
+UUID_FILE="${LOG_DIR}/thc-latest-snapshot-uuid"
 
 # Create log directory if it doesn't exist
 mkdir -p "${LOG_DIR}" || {
