@@ -1,0 +1,21 @@
+global:
+  env: development
+  log_level: info
+  metrics:
+    enabled: true
+    port: 9090
+
+fil:
+  lotus:
+    api_url: "http://127.0.0.1:1234/rpc/v1"
+    token: ""
+    timeout: 30s
+  services:
+    sectors_penalty:
+      port: 8099
+      rate_limit: 100
+      cache_ttl: 300s
+
+cli:
+  default_output: table
+  color_enabled: true
