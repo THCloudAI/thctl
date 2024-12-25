@@ -1,0 +1,42 @@
+global:
+  # 运行环境: development, testing, production
+  env: development
+  # 日志级别: debug, info, warn, error
+  log_level: info
+  # 监控指标配置
+  metrics:
+    enabled: true
+    port: 9090
+
+fil:
+  # Lotus API配置
+  lotus:
+    # Lotus API地址
+    api_url: "http://127.0.0.1:1234/rpc/v1"
+    # Lotus API Token，可以通过环境变量 THCTL_FIL_LOTUS_TOKEN 设置
+    token: ""
+    # API请求超时时间
+    timeout: 30s
+  # Filecoin相关服务配置
+  services:
+    # 扇区惩罚服务配置
+    sectors_penalty:
+      # 服务端口
+      port: 8099
+      # API速率限制（每分钟请求数）
+      rate_limit: 100
+      # 缓存有效期
+      cache_ttl: 300s
+
+cli:
+  # 默认输出格式: table, json, csv
+  default_output: table
+  # 是否启用彩色输出
+  color_enabled: true
+
+# 环境变量映射说明：
+# THCTL_GLOBAL_ENV              -> global.env
+# THCTL_GLOBAL_LOG_LEVEL        -> global.log_level
+# THCTL_FIL_LOTUS_API_URL      -> fil.lotus.api_url
+# THCTL_FIL_LOTUS_TOKEN        -> fil.lotus.token
+# THCTL_FIL_SERVICES_SECTORS_PENALTY_PORT -> fil.services.sectors_penalty.port
