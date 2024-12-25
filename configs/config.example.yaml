@@ -28,6 +28,41 @@ fil:
       # 缓存有效期
       cache_ttl: 300s
 
+storage:
+  # AWS S3配置
+  s3:
+    region: "us-west-2"
+    access_key: ""  # Can be set via THCTL_S3_ACCESS_KEY
+    secret_key: ""  # Can be set via THCTL_S3_SECRET_KEY
+    endpoint: ""    # Optional, for S3-compatible services
+    bucket_name: "" # Default bucket name
+
+  # Aliyun OSS配置
+  oss:
+    region: "cn-hangzhou"
+    access_key: ""  # Can be set via THCTL_OSS_ACCESS_KEY
+    secret_key: ""  # Can be set via THCTL_OSS_SECRET_KEY
+    endpoint: "oss-cn-hangzhou.aliyuncs.com"  # OSS endpoint
+    bucket_name: "" # Default bucket name
+    internal: false # Use internal endpoint
+
+  # Tencent COS配置
+  cos:
+    region: "ap-guangzhou"
+    access_key: ""  # Can be set via THCTL_COS_ACCESS_KEY
+    secret_key: ""  # Can be set via THCTL_COS_SECRET_KEY
+    endpoint: ""    # Optional COS endpoint
+    bucket_name: "" # Default bucket name
+    app_id: ""      # Tencent Cloud APP ID
+
+log:
+  # 日志级别: debug, info, warn, error
+  level: "info"
+  # 日志文件路径（空为stdout）
+  file: ""
+  # 日志格式: text, json
+  format: "text"
+
 cli:
   # 默认输出格式: table, json, csv
   default_output: table
