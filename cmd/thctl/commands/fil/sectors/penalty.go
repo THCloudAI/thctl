@@ -9,7 +9,7 @@ import (
 	"github.com/THCloudAI/thctl/pkg/framework/output"
 )
 
-// PenaltyResult represents the penalty calculation result
+// PenaltyResult represents the sector penalty result
 type PenaltyResult struct {
 	MinerID  string `json:"miner_id" yaml:"miner_id"`
 	Sector   uint64 `json:"sector" yaml:"sector"`
@@ -36,8 +36,8 @@ func newPenaltyCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "penalty",
-		Short: "Calculate sector penalty",
-		Long: `Calculate the penalty for a specific sector.
+		Short: "Get sector penalty",
+		Long: `Get the penalty for a sector.
 
 Example:
   thctl fil sectors penalty --miner f01234 --sector 1`,
@@ -78,7 +78,7 @@ Example:
 			result := PenaltyResult{
 				MinerID: minerID,
 				Sector:  sectorNum,
-				Penalty: penalty,
+				Penalty: penalty.InitialPledge,
 			}
 
 			// Get output format
