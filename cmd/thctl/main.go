@@ -21,11 +21,6 @@ import (
 	"github.com/THCloudAI/thctl/pkg/version"
 )
 
-const (
-	// Version is the version of thctl
-	Version = "1.3.0"
-)
-
 var (
 	// Global flags
 	outputFormat string
