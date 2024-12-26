@@ -1,7 +1,7 @@
 // Package version provides version information for thctl
 package version
 
-const (
+var (
 	// Version is the current version of thctl
-	Version = "1.1.0"
+	Version = "1.2.0"
 )
