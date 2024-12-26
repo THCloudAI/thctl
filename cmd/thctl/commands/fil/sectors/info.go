@@ -57,31 +57,40 @@ func newInfoCmd() *cobra.Command {
 Example:
   thctl fil sectors info --miner f01234 --sector 1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Get configuration
-			cfg := config.LoadFilConfig()
-			if cfg == nil {
-				return fmt.Errorf("failed to get configuration")
+			// Load configuration
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("failed to load configuration: %v", err)
 			}
 
-			// Create Lotus client configuration
-			lotusCfg := lotus.Config{
-				APIURL:    cfg.GetString("lotus.api_url"),
-				AuthToken: cfg.GetString("lotus.token"),
-				Timeout:   cfg.GetDuration("lotus.timeout"),
+			// Get miner ID from flag
+			minerID := cmd.Flag("miner").Value.String()
+			if minerID == "" {
+				return fmt.Errorf("miner ID is required")
 			}
 
 			// Create Lotus client
-			client := lotus.New(lotusCfg)
+			client := lotus.New(lotus.Config{
+				APIURL:    cfg.Lotus.APIURL,
+				AuthToken: cfg.Lotus.AuthToken,
+			})
 
 			// Get sector info
 			ctx := cmd.Context()
-			info, err := client.GetSectorInfo(ctx, minerID, int64(sectorNum))
+
+			// Get sector ID from flag
+			sectorID, err := cmd.Flags().GetInt64("sector")
+			if err != nil {
+				return fmt.Errorf("failed to get sector ID: %v", err)
+			}
+
+			info, err := client.GetSectorInfo(ctx, minerID, sectorID)
 			if err != nil {
 				return fmt.Errorf("failed to get sector info: %v", err)
 			}
 
 			// Get output format
-			format := output.Format(cfg.GetString("output"))
+			format := output.Format("table")
 			if !format.IsValid() {
 				format = output.FormatTable
 			}

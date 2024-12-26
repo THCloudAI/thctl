@@ -41,39 +41,51 @@ func newVestedCmd() *cobra.Command {
 Example:
   thctl fil sectors vested --miner f01234 --sector 1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Get configuration
-			cfg := config.LoadFilConfig()
-			if cfg == nil {
-				return fmt.Errorf("failed to get configuration")
+			// Load configuration
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("failed to load configuration: %v", err)
+			}
+
+			// Get miner ID from flag
+			minerID := cmd.Flag("miner").Value.String()
+			if minerID == "" {
+				return fmt.Errorf("miner ID is required")
 			}
 
 			// Create Lotus client configuration
-			lotusCfg := lotus.Config{
-				APIURL:    cfg.GetString("lotus.api_url"),
-				AuthToken: cfg.GetString("lotus.token"),
-				Timeout:   cfg.GetDuration("lotus.timeout"),
+			clientConfig := lotus.Config{
+				APIURL:    cfg.Lotus.APIURL,
+				AuthToken: cfg.Lotus.AuthToken,
 			}
 
 			// Override with command line flags
 			if apiURL != "" {
-				lotusCfg.APIURL = apiURL
+				clientConfig.APIURL = apiURL
 			}
 			if authToken != "" {
-				lotusCfg.AuthToken = authToken
+				clientConfig.AuthToken = authToken
 			}
 
 			// Create Lotus client
-			client := lotus.New(lotusCfg)
+			client := lotus.New(clientConfig)
 
 			// Get vested funds
 			ctx := cmd.Context()
-			vested, err := client.GetSectorVested(ctx, minerID, int64(sectorNum))
+
+			// Get sector ID from flag
+			sectorID, err := cmd.Flags().GetInt64("sector")
+			if err != nil {
+				return fmt.Errorf("failed to get sector ID: %v", err)
+			}
+
+			vested, err := client.GetSectorVested(ctx, minerID, sectorID)
 			if err != nil {
 				return fmt.Errorf("failed to get vested funds: %v", err)
 			}
 
 			// Get output format
-			format := output.Format(cfg.GetString("output"))
+			format := output.Format("table")
 			if !format.IsValid() {
 				format = output.FormatTable
 			}

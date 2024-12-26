@@ -24,33 +24,15 @@ type Config struct {
     RetryCount int           `mapstructure:"retry_count"`
 }
 
-// DefaultConfig returns the default configuration for a Lotus client
-func DefaultConfig() *Config {
-    return &Config{
-        APIURL:  "http://127.0.0.1:1234/rpc/v0",
-        Timeout: 30 * time.Second,
-    }
-}
-
-// Client represents a Lotus API client
-type Client struct {
-    apiURL     string
-    token      string
-    httpClient *http.Client
-}
+var defaultTimeout = 30 * time.Second
 
 // New creates a new Lotus client
 func New(cfg Config) *Client {
     if cfg.APIURL == "" {
         cfg.APIURL = "http://127.0.0.1:1234/rpc/v0"
     }
-    if cfg.AuthToken == "" {
-        if token := os.Getenv("LOTUS_API_TOKEN"); token != "" {
-            cfg.AuthToken = token
-        }
-    }
     if cfg.Timeout == 0 {
-        cfg.Timeout = 30 * time.Second
+        cfg.Timeout = defaultTimeout
     }
 
     return &Client{
@@ -64,8 +46,7 @@ func New(cfg Config) *Client {
 
 // NewFromEnv creates a new Lotus client from environment variables
 func NewFromEnv() *Client {
-    config := DefaultConfig()
-
+    config := &Config{}
     if url := os.Getenv("LOTUS_API_URL"); url != "" {
         config.APIURL = url
     }
@@ -74,6 +55,13 @@ func NewFromEnv() *Client {
     }
 
     return New(*config)
+}
+
+// Client represents a Lotus API client
+type Client struct {
+    apiURL     string
+    token      string
+    httpClient *http.Client
 }
 
 // callRPC makes a JSON-RPC call to the Lotus API
@@ -698,43 +686,33 @@ func formatAttoFil(attoFil string) string {
 
 // GetMinerStats returns formatted statistics about a miner
 func (c *Client) GetMinerStats(ctx context.Context, minerID string) (map[string]string, error) {
-    info, err := c.GetComprehensiveMinerInfo(ctx, minerID)
-    if err != nil {
-        return nil, err
-    }
-
     stats := make(map[string]string)
 
-    // Format power information
-    stats["Raw Power"] = formatBytes(info.RawBytePower)
-    stats["Quality Adjusted Power"] = formatBytes(info.QualityAdjPower)
-    stats["Network Power Share"] = fmt.Sprintf("%.4f%%", info.NetworkPowerShare)
+    info, err := c.GetComprehensiveMinerInfo(ctx, minerID)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get miner info: %v", err)
+    }
 
-    // Format financial information
+    // Format and add statistics
+    stats["Raw Power"] = formatBytes(info.RawBytePower)
+    stats["Quality-Adjusted Power"] = formatBytes(info.QualityAdjPower)
+    stats["Network Power Share"] = fmt.Sprintf("%.4f%%", info.NetworkPowerShare*100)
     stats["Available Balance"] = formatAttoFil(info.AvailableBalance)
     stats["Initial Pledge"] = formatAttoFil(info.InitialPledge)
     stats["Pre-Commit Deposits"] = formatAttoFil(info.PreCommitDeposits)
     stats["Vesting Funds"] = formatAttoFil(info.VestingFunds)
     stats["Total Locked"] = formatAttoFil(info.TotalLocked)
-
-    // Format sector information
     stats["Total Sectors"] = fmt.Sprintf("%d", info.TotalSectors)
     stats["Active Sectors"] = fmt.Sprintf("%d", info.ActiveSectors)
     stats["Faulty Sectors"] = fmt.Sprintf("%d", len(info.FaultySectors))
     stats["Recovering Sectors"] = fmt.Sprintf("%d", len(info.RecoveringSectors))
-
-    // Format deadline information
-    stats["Current Epoch"] = fmt.Sprintf("%d", info.CurrentEpoch)
+    stats["Live Sectors"] = fmt.Sprintf("%d", len(info.LiveSectors))
     stats["Current Deadline"] = fmt.Sprintf("%d", info.CurrentDeadline)
+    stats["Current Epoch"] = fmt.Sprintf("%d", info.CurrentEpoch)
     stats["Proving Period Start"] = fmt.Sprintf("%d", info.ProvingPeriodStart)
-
-    // Calculate and format additional metrics
-    if info.TotalSectors > 0 {
-        faultPercentage := float64(len(info.FaultySectors)) / float64(info.TotalSectors) * 100
-        stats["Fault Rate"] = fmt.Sprintf("%.2f%%", faultPercentage)
-    } else {
-        stats["Fault Rate"] = "0.00%"
-    }
+    stats["Quality-Adjusted Power/Sector"] = formatBytes(info.QualityAdjPowerPerSector)
+    stats["Consensus Miners"] = fmt.Sprintf("%d", info.ConsensusMiners)
+    stats["Miner Uptime"] = fmt.Sprintf("%.2f%%", info.MinerUptime*100)
 
     return stats, nil
 }
