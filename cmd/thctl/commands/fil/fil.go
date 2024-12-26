@@ -68,6 +68,7 @@ Flags:
 	// Add persistent flags for API configuration
 	cmd.PersistentFlags().String("api-url", "", "Lotus API URL (overrides config)")
 	cmd.PersistentFlags().String("auth-token", "", "Lotus API token (overrides config)")
+	cmd.PersistentFlags().StringP("output", "o", "", "Output format: json, yaml, or table (default \"json\")")
 
 	return cmd
 }

@@ -30,7 +30,7 @@ func NewMinerCmd() *cobra.Command {
     }
 
     // Add flags
-    cmd.PersistentFlags().StringP("output", "o", "table", "Output format: json, yaml, or table")
+    cmd.PersistentFlags().StringP("output", "o", "json", "Output format: json, yaml, or table")
 
     return cmd
 }
