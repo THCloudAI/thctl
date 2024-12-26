@@ -1,5 +1,6 @@
 # Binaries and build output
 bin/
+thctl
 *.exe
 *.exe~
 *.dll
@@ -11,8 +12,12 @@ bin/
 
 # Output of the go coverage tool
 *.out
-*.cover
-coverage.html
+
+# Environment files
+.thctl.env
+.env
+*.env
+!.thctl.env.example
 
 # IDE specific files
 .idea/
@@ -29,19 +34,6 @@ coverage.html
 .Trashes
 ehthumbs.db
 Thumbs.db
-
-# Configuration files that might contain sensitive information
-.env
-*.env
-.env.*
-config.local.yaml
-config.dev.yaml
-config.prod.yaml
-*.pem
-*.key
-*.crt
-*.p12
-*.pfx
 
 # Debug files
 debug

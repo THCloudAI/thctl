@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/THCloudAI/thctl/internal/lotus"
-	"github.com/THCloudAI/thctl/pkg/framework/config"
-	"github.com/THCloudAI/thctl/pkg/framework/output"
+	"github.com/THCloudAI/thctl/internal/config"
+	"github.com/THCloudAI/thctl/internal/output"
 )
 
 // VestedResult represents the vested funds result
@@ -28,6 +28,7 @@ func (r VestedResult) TableRow() []string {
 func newVestedCmd() *cobra.Command {
 	var (
 		minerID    string
+		sectorNum  int
 		apiURL     string
 		authToken  string
 	)
@@ -38,20 +39,19 @@ func newVestedCmd() *cobra.Command {
 		Long: `Get the total vested funds for a miner.
 
 Example:
-  thctl fil sectors vested --miner f01234`,
+  thctl fil sectors vested --miner f01234 --sector 1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Get configuration
-			cfg := config.Global()
+			cfg := config.LoadFilConfig()
 			if cfg == nil {
 				return fmt.Errorf("failed to get configuration")
 			}
 
 			// Create Lotus client configuration
-			lotusCfg := lotus.DefaultConfig()
-			
-			// Override with config file values
-			if err := cfg.UnmarshalKey("fil.lotus", lotusCfg); err != nil {
-				return fmt.Errorf("failed to unmarshal lotus config: %v", err)
+			lotusCfg := lotus.Config{
+				APIURL:    cfg.GetString("lotus.api_url"),
+				AuthToken: cfg.GetString("lotus.token"),
+				Timeout:   cfg.GetDuration("lotus.timeout"),
 			}
 
 			// Override with command line flags
@@ -63,19 +63,13 @@ Example:
 			}
 
 			// Create Lotus client
-			client := lotus.NewClient(lotusCfg)
+			client := lotus.New(lotusCfg)
 
 			// Get vested funds
 			ctx := cmd.Context()
-			vested, err := client.GetVestedFunds(ctx, minerID)
+			vested, err := client.GetSectorVested(ctx, minerID, int64(sectorNum))
 			if err != nil {
 				return fmt.Errorf("failed to get vested funds: %v", err)
-			}
-
-			// Create result
-			result := VestedResult{
-				MinerID: minerID,
-				Vested:  vested.AvailableBalance,
 			}
 
 			// Get output format
@@ -86,7 +80,7 @@ Example:
 
 			// Print result
 			printer := output.NewPrinter(format)
-			if err := printer.Print(result); err != nil {
+			if err := printer.Print(vested); err != nil {
 				return fmt.Errorf("failed to print result: %v", err)
 			}
 
@@ -96,11 +90,13 @@ Example:
 
 	// Add flags
 	cmd.Flags().StringVar(&minerID, "miner", "", "Miner ID (required)")
+	cmd.Flags().IntVar(&sectorNum, "sector", 0, "Sector number (required)")
 	cmd.Flags().StringVar(&apiURL, "api-url", "", "Lotus API URL (overrides config)")
 	cmd.Flags().StringVar(&authToken, "auth-token", "", "Lotus API token (overrides config)")
 
 	// Mark required flags
 	cmd.MarkFlagRequired("miner")
+	cmd.MarkFlagRequired("sector")
 
 	return cmd
 }

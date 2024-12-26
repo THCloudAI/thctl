@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/THCloudAI/thctl/internal/lotus"
-	"github.com/THCloudAI/thctl/pkg/framework/config"
-	"github.com/THCloudAI/thctl/pkg/framework/output"
+	"github.com/THCloudAI/thctl/internal/config"
+	"github.com/THCloudAI/thctl/internal/output"
 )
 
 // InfoResult represents the sector info result
@@ -58,44 +58,26 @@ Example:
   thctl fil sectors info --miner f01234 --sector 1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Get configuration
-			cfg := config.Global()
+			cfg := config.LoadFilConfig()
 			if cfg == nil {
 				return fmt.Errorf("failed to get configuration")
 			}
 
 			// Create Lotus client configuration
-			lotusCfg := lotus.DefaultConfig()
-			
-			// Override with config file values
-			if err := cfg.UnmarshalKey("fil.lotus", lotusCfg); err != nil {
-				return fmt.Errorf("failed to unmarshal lotus config: %v", err)
-			}
-
-			// Override with command line flags
-			if apiURL != "" {
-				lotusCfg.APIURL = apiURL
-			}
-			if authToken != "" {
-				lotusCfg.AuthToken = authToken
+			lotusCfg := lotus.Config{
+				APIURL:    cfg.GetString("lotus.api_url"),
+				AuthToken: cfg.GetString("lotus.token"),
+				Timeout:   cfg.GetDuration("lotus.timeout"),
 			}
 
 			// Create Lotus client
-			client := lotus.NewClient(lotusCfg)
+			client := lotus.New(lotusCfg)
 
 			// Get sector info
 			ctx := cmd.Context()
-			info, err := client.GetSectorInfo(ctx, minerID, sectorNum)
+			info, err := client.GetSectorInfo(ctx, minerID, int64(sectorNum))
 			if err != nil {
 				return fmt.Errorf("failed to get sector info: %v", err)
-			}
-
-			// Create result
-			result := InfoResult{
-				MinerID:    minerID,
-				SectorID:   info["sector_id"].(uint64),
-				State:      info["state"].(string),
-				SealedCID:  info["sealed_cid"].(string),
-				DealIDs:    info["deal_ids"].([]uint64),
 			}
 
 			// Get output format
@@ -106,7 +88,7 @@ Example:
 
 			// Print result
 			printer := output.NewPrinter(format)
-			if err := printer.Print(result); err != nil {
+			if err := printer.Print(info); err != nil {
 				return fmt.Errorf("failed to print result: %v", err)
 			}
 
