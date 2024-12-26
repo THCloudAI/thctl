@@ -142,3 +142,57 @@ func (c *Config) BindEnv(input ...string) error {
 func (c *Config) Viper() *viper.Viper {
 	return c.v
 }
+
+// LoadFilConfig returns a Config instance specifically for fil commands
+func LoadFilConfig() *Config {
+	// Get project root directory
+	rootDir := os.Getenv("THCTL_ROOT_DIR")
+	if rootDir == "" {
+		// Try to find the root directory by looking for go.mod
+		dir, err := os.Getwd()
+		if err == nil {
+			for {
+				if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+					rootDir = dir
+					break
+				}
+				parent := filepath.Dir(dir)
+				if parent == dir {
+					break
+				}
+				dir = parent
+			}
+		}
+	}
+
+	if rootDir == "" {
+		// Fallback to current directory
+		rootDir, _ = os.Getwd()
+	}
+
+	fmt.Printf("Debug: Root directory: %s\n", rootDir)
+	configPath := filepath.Join(rootDir, "configs")
+	fmt.Printf("Debug: Config path: %s\n", configPath)
+
+	opts := &Options{
+		ConfigName: "config",
+		ConfigType: "yaml",
+		ConfigPaths: []string{
+			configPath,
+		},
+	}
+
+	cfg := New(opts)
+	if err := cfg.Load(); err != nil {
+		fmt.Printf("Warning: failed to load fil config: %v\n", err)
+	}
+
+	// Debug: print loaded configuration
+	if filConfig := cfg.Get("fil"); filConfig != nil {
+		fmt.Printf("Debug: Loaded fil config: %+v\n", filConfig)
+	} else {
+		fmt.Printf("Debug: No fil config found\n")
+	}
+
+	return cfg
+}
