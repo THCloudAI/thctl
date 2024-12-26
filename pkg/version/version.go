@@ -3,5 +3,5 @@ package version
 
 var (
 	// Version is the current version of thctl
-	Version = "1.2.0"
+	Version = "1.3.0"
 )

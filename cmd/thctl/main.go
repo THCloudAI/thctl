@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/auth"
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/cos"
+	"github.com/THCloudAI/thctl/cmd/thctl/commands/doctor"
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/fil"
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/oss"
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/s3"
@@ -21,7 +22,8 @@ import (
 )
 
 const (
-	// version = "1.0.0"
+	// Version is the version of thctl
+	Version = "1.3.0"
 )
 
 var (
@@ -91,7 +93,7 @@ Global Options:
 
 func init() {
 	// Global flags
-	rootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "table", "Output format (json, yaml, table)")
+	rootCmd.PersistentFlags().StringVarP(&outputFormat, "output", "o", "json", "Output format (json, yaml, table)")
 	rootCmd.PersistentFlags().StringVar(&configDir, "config-dir", "", "Path to config directory")
 	rootCmd.PersistentFlags().StringVar(&apiKey, "api-key", "", "THCloud.AI API key")
 	rootCmd.PersistentFlags().BoolVarP(&showVersion, "version", "v", false, "Show version number")
@@ -99,6 +101,7 @@ func init() {
 	// Add commands
 	rootCmd.AddCommand(
 		auth.NewAuthCmd(),
+		doctor.NewDoctorCmd(),
 		fil.NewFilCmd(),
 		cos.NewCosCmd(),
 		oss.NewOssCmd(),
