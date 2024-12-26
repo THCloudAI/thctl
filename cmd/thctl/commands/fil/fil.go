@@ -30,8 +30,8 @@ func NewFilCmd() *cobra.Command {
 				return fmt.Errorf("failed to create Lotus client")
 			}
 
-			// TODO: Add default behavior when no subcommand is specified
-			return nil
+			// If no subcommand is specified, show help
+			return cmd.Help()
 		},
 	}
 
@@ -39,9 +39,8 @@ func NewFilCmd() *cobra.Command {
 	minerCmd := miner.NewMinerCmd()
 	sectorsCmd := sectors.NewSectorsCmd()
 
-	// Configure subcommands to not show global flags
-	for _, subcmd := range []*cobra.Command{minerCmd, sectorsCmd} {
-		subcmd.SetHelpTemplate(`{{.Long | trimTrailingWhitespaces}}
+	// Set custom help template for all commands to not show global flags
+	helpTemplate := `{{.Long | trimTrailingWhitespaces}}
 
 Usage:{{if .Runnable}}
   {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
@@ -56,15 +55,19 @@ Available Commands:{{range .Commands}}{{if (or .IsAvailableCommand (eq .Name "he
 Flags:
 {{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}
 {{end}}
-`)
+`
+
+	// Apply template to fil command and all subcommands
+	cmd.SetHelpTemplate(helpTemplate)
+	for _, subcmd := range []*cobra.Command{minerCmd, sectorsCmd} {
+		subcmd.SetHelpTemplate(helpTemplate)
 	}
 
 	cmd.AddCommand(sectorsCmd, minerCmd)
 
-	// Add persistent flags
+	// Add persistent flags for API configuration
 	cmd.PersistentFlags().String("api-url", "", "Lotus API URL (overrides config)")
 	cmd.PersistentFlags().String("auth-token", "", "Lotus API token (overrides config)")
-	cmd.PersistentFlags().String("miner", "", "Miner ID (required)")
 
 	return cmd
 }
