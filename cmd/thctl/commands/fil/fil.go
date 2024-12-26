@@ -3,6 +3,7 @@ package fil
 import (
 	"github.com/spf13/cobra"
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/fil/sectors"
+	"github.com/THCloudAI/thctl/pkg/framework/template"
 )
 
 // NewFilCmd creates a new fil command
@@ -18,8 +19,13 @@ Examples:
 
   # Query vested funds
   thctl fil sectors vested --miner f01234`,
+		Run: func(cmd *cobra.Command, args []string) {
+			cmd.Help()
+		},
 	}
 
+	cmd.SetHelpTemplate(template.SubCommandHelpTemplate)
+	
 	// Add subcommands
 	cmd.AddCommand(sectors.NewSectorsCmd())
 

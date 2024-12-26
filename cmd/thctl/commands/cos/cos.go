@@ -7,15 +7,28 @@ package cos
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/THCloudAI/thctl/pkg/framework/template"
 )
 
-// NewCOSCmd creates a new cos command
-func NewCOSCmd() *cobra.Command {
+// NewCosCmd creates a new cos command
+func NewCosCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "cos",
-		Short: "Tencent COS operations",
-		Long:  `Manage Tencent COS storage, including bucket operations and object management.`,
+		Short: "Tencent Cloud COS operations",
+		Long: `Manage Tencent Cloud Object Storage (COS) operations.
+
+Examples:
+  # Upload a file
+  thctl cos upload --bucket my-bucket --file /path/to/file
+
+  # Download a file
+  thctl cos download --bucket my-bucket --key file-key`,
+		Run: func(cmd *cobra.Command, args []string) {
+			cmd.Help()
+		},
 	}
+
+	cmd.SetHelpTemplate(template.SubCommandHelpTemplate)
 
 	// Add subcommands
 	cmd.AddCommand(
