@@ -3,5 +3,5 @@ package version
 
 const (
 	// Version is the current version of thctl
-	Version = "1.0.0"
+	Version = "1.1.0"
 )
