@@ -3,89 +3,72 @@ package fil
 import (
 	"fmt"
 	"github.com/spf13/cobra"
+	"github.com/THCloudAI/thctl/cmd/thctl/commands/fil/miner"
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/fil/sectors"
-	"github.com/THCloudAI/thctl/internal/config"
 	"github.com/THCloudAI/thctl/internal/lotus"
-	"github.com/THCloudAI/thctl/internal/output"
 )
 
-// NewFilCmd creates a new fil command
 func NewFilCmd() *cobra.Command {
-	var (
-		minerID   string
-		apiURL    string
-		authToken string
-	)
-
 	cmd := &cobra.Command{
 		Use:   "fil",
-		Short: "Filecoin commands",
+		Short: "Commands for interacting with Filecoin network",
 		Long:  `Commands for interacting with Filecoin network.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Get configuration
-			cfg := config.LoadFilConfig()
-			if apiURL != "" {
-				cfg.Set("lotus.api_url", apiURL)
-			}
-			if authToken != "" {
-				cfg.Set("lotus.token", authToken)
-			}
+			// Get flags
+			apiURL, _ := cmd.Flags().GetString("api-url")
+			authToken, _ := cmd.Flags().GetString("auth-token")
 
 			// Create Lotus client configuration
-			lotusCfg := lotus.Config{
-				APIURL:    cfg.GetString("lotus.api_url"),
-				AuthToken: cfg.GetString("lotus.token"),
-				Timeout:   cfg.GetDuration("lotus.timeout"),
+			cfg := lotus.Config{
+				APIURL:    apiURL,
+				AuthToken: authToken,
 			}
 
 			// Create Lotus client
-			client := lotus.New(lotusCfg)
-
-			// Get miner info
-			ctx := cmd.Context()
-			info, err := client.GetMinerInfo(ctx, minerID)
-			if err != nil {
-				return fmt.Errorf("failed to get miner info: %v", err)
+			client := lotus.New(cfg)
+			if client == nil {
+				return fmt.Errorf("failed to create Lotus client")
 			}
 
-			// Get miner power
-			power, err := client.GetMinerPower(ctx, minerID)
-			if err != nil {
-				return fmt.Errorf("failed to get miner power: %v", err)
-			}
-
-			// Combine results
-			result := map[string]interface{}{
-				"miner_id": minerID,
-				"info":     info,
-				"power":    power,
-			}
-
-			// Get output format
-			format := output.Format(cfg.GetString("output"))
-			if !format.IsValid() {
-				format = output.FormatTable
-			}
-
-			// Print result
-			printer := output.NewPrinter(format)
-			if err := printer.Print(result); err != nil {
-				return fmt.Errorf("failed to print result: %v", err)
-			}
-
-			return nil
+			// If no subcommand is specified, show help
+			return cmd.Help()
 		},
 	}
 
-	cmd.Flags().StringVar(&minerID, "miner", "", "Miner ID (required)")
-	cmd.Flags().StringVar(&apiURL, "api-url", "", "Lotus API URL (overrides config)")
-	cmd.Flags().StringVar(&authToken, "auth-token", "", "Lotus API token (overrides config)")
+	// Add subcommands
+	minerCmd := miner.NewMinerCmd()
+	sectorsCmd := sectors.NewSectorsCmd()
 
-	cmd.MarkFlagRequired("miner")
+	// Set custom help template for all commands to not show global flags
+	helpTemplate := `{{.Long | trimTrailingWhitespaces}}
 
-	cmd.AddCommand(
-		sectors.NewSectorsCmd(),
-	)
+Usage:{{if .Runnable}}
+  {{.UseLine}}{{end}}{{if .HasAvailableSubCommands}}
+  {{.CommandPath}} [command]{{end}}{{if gt (len .Aliases) 0}}
+
+Aliases:
+  {{.NameAndAliases}}{{end}}{{if .HasAvailableSubCommands}}
+
+Available Commands:{{range .Commands}}{{if (or .IsAvailableCommand (eq .Name "help"))}}
+  {{rpad .Name .NamePadding }} {{.Short}}{{end}}{{end}}{{end}}{{if .HasAvailableLocalFlags}}
+
+Flags:
+{{.LocalFlags.FlagUsages | trimTrailingWhitespaces}}{{end}}{{if .HasAvailableInheritedFlags}}
+{{end}}
+`
+
+	// Apply template to fil command and all subcommands
+	cmd.SetHelpTemplate(helpTemplate)
+	for _, subcmd := range []*cobra.Command{minerCmd, sectorsCmd} {
+		subcmd.SetHelpTemplate(helpTemplate)
+	}
+
+	cmd.AddCommand(sectorsCmd, minerCmd)
+
+	// Add persistent flags for API configuration
+	cmd.PersistentFlags().String("api-url", "", "Lotus API URL (overrides config)")
+	cmd.PersistentFlags().String("auth-token", "", "Lotus API token (overrides config)")
+	cmd.PersistentFlags().StringP("output", "o", "", "Output format: json, yaml, or table (default \"json\")")
 
 	return cmd
 }
