@@ -12,21 +12,18 @@ thctl
 
 # Output of the go coverage tool
 *.out
-
-# Environment files
-.thctl.env
-.env
-*.env
-!.thctl.env.example
+*.cover
+coverage.html
 
 # IDE specific files
 .idea/
 .vscode/
 *.swp
 *.swo
-*~
+*.swn
+*.bak
 
-# OS specific files
+# OS generated files
 .DS_Store
 .DS_Store?
 ._*
@@ -35,32 +32,20 @@ thctl
 ehthumbs.db
 Thumbs.db
 
+# Configuration files that might contain sensitive information
+.env
+*.env
+.env.*
+!.thctl.env.example
+config.local.yaml
+config.dev.yaml
+config.prod.yaml
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
 # Debug files
 debug
 __debug_bin
-
-# Log files
-*.log
-logs/
-log/
-
-# Temporary files
-tmp/
-temp/
-*.tmp
-
-# Dependency directories
-vendor/
-
-# Go workspace file
-go.work
-go.work.sum
-
-# Local development files
-.local/
-local/
-dev/
-
-# Security scanning reports
-security-scan-results/
-gitleaks-report.json
