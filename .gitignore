@@ -12,18 +12,18 @@ thctl
 
 # Output of the go coverage tool
 *.out
-*.cover
-coverage.html
+*.log
+logs/
+log/
 
 # IDE specific files
 .idea/
 .vscode/
 *.swp
 *.swo
-*.swn
-*.bak
+*~
 
-# OS generated files
+# OS specific files
 .DS_Store
 .DS_Store?
 ._*
@@ -46,6 +46,23 @@ config.prod.yaml
 *.p12
 *.pfx
 
-# Debug files
-debug
-__debug_bin
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Local development files
+.local/
+local/
+dev/
+
+# Security scanning reports
+security-scan-results/
+gitleaks-report.json
