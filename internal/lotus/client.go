@@ -9,11 +9,13 @@ import (
     "math/big"
     "net/http"
     "os"
+    "path/filepath"
+    "sort"
     "strings"
+    "sync"
     "time"
 
-    ma "github.com/multiformats/go-multiaddr"
-    "golang.org/x/sync/errgroup"
+    "github.com/multiformats/go-multiaddr"
 )
 
 // Config represents the configuration for a Lotus client
@@ -28,33 +30,81 @@ var defaultTimeout = 30 * time.Second
 
 // New creates a new Lotus client
 func New(cfg Config) *Client {
-    if cfg.APIURL == "" {
-        cfg.APIURL = "http://127.0.0.1:1234/rpc/v0"
-    }
     if cfg.Timeout == 0 {
         cfg.Timeout = defaultTimeout
     }
+    if cfg.RetryCount == 0 {
+        cfg.RetryCount = 3
+    }
+
+    httpClient := &http.Client{
+        Timeout: cfg.Timeout,
+    }
 
     return &Client{
-        apiURL: cfg.APIURL,
-        token:  cfg.AuthToken,
-        httpClient: &http.Client{
-            Timeout: cfg.Timeout,
-        },
+        apiURL:     cfg.APIURL,
+        token:      cfg.AuthToken,
+        httpClient: httpClient,
     }
 }
 
 // NewFromEnv creates a new Lotus client from environment variables
-func NewFromEnv() *Client {
-    config := &Config{}
-    if url := os.Getenv("LOTUS_API_URL"); url != "" {
-        config.APIURL = url
-    }
-    if token := os.Getenv("LOTUS_API_TOKEN"); token != "" {
-        config.AuthToken = token
+func NewFromEnv() (*Client, error) {
+    // Try to read from .thctl.env file first
+    home, err := os.UserHomeDir()
+    if err != nil {
+        return nil, fmt.Errorf("failed to get home directory: %v", err)
     }
 
-    return New(*config)
+    envFile := filepath.Join(home, ".thctl.env")
+    if _, err := os.Stat(envFile); err == nil {
+        data, err := os.ReadFile(envFile)
+        if err != nil {
+            return nil, fmt.Errorf("failed to read .thctl.env: %v", err)
+        }
+
+        // Parse environment variables format
+        var apiURL, authToken string
+        lines := strings.Split(string(data), "\n")
+        for _, line := range lines {
+            line = strings.TrimSpace(line)
+            if line == "" || strings.HasPrefix(line, "#") {
+                continue
+            }
+
+            parts := strings.SplitN(line, "=", 2)
+            if len(parts) != 2 {
+                continue
+            }
+
+            key := strings.TrimSpace(parts[0])
+            value := strings.Trim(strings.TrimSpace(parts[1]), `"'`)
+
+            switch key {
+            case "LOTUS_API_URL":
+                apiURL = value
+            case "LOTUS_API_TOKEN":
+                authToken = value
+            }
+        }
+
+        if apiURL != "" && authToken != "" {
+            // Validate multiaddr format
+            if !strings.HasPrefix(apiURL, "/ip4/") && !strings.HasPrefix(apiURL, "/ip6/") {
+                return nil, fmt.Errorf("LOTUS_API_URL must be in multiaddr format (e.g., /ip4/127.0.0.1/tcp/1234)")
+            }
+
+            cfg := Config{
+                APIURL:    apiURL,
+                AuthToken: authToken,
+                Timeout:   30 * time.Second,
+            }
+
+            return New(cfg), nil
+        }
+    }
+
+    return nil, fmt.Errorf("LOTUS_API_URL and LOTUS_API_TOKEN must be set in .thctl.env")
 }
 
 // Client represents a Lotus API client
@@ -64,101 +114,85 @@ type Client struct {
     httpClient *http.Client
 }
 
-// callRPC makes a JSON-RPC call to the Lotus API
-func (c *Client) callRPC(ctx context.Context, method string, params interface{}, result interface{}) error {
-    // Convert multiaddr URL to HTTP URL if necessary
-    apiURL := c.apiURL
-    if strings.HasPrefix(apiURL, "/ip4/") || strings.HasPrefix(apiURL, "/ip6/") {
-        maddr, err := ma.NewMultiaddr(apiURL)
-        if err != nil {
-            return fmt.Errorf("failed to parse multiaddr: %v", err)
-        }
-
-        // Extract IP and port from multiaddr
-        ip, err := maddr.ValueForProtocol(ma.P_IP4)
-        if err != nil {
-            ip, err = maddr.ValueForProtocol(ma.P_IP6)
-            if err != nil {
-                return fmt.Errorf("failed to get IP from multiaddr: %v", err)
-            }
-        }
-        port, err := maddr.ValueForProtocol(ma.P_TCP)
-        if err != nil {
-            return fmt.Errorf("failed to get port from multiaddr: %v", err)
-        }
-
-        // Construct HTTP URL
-        apiURL = fmt.Sprintf("http://%s:%s/rpc/v0", ip, port)
+// callRPCWithRetry makes a JSON-RPC call to the Lotus API with retry
+func (c *Client) callRPCWithRetry(ctx context.Context, method string, params []interface{}, result interface{}) error {
+    if c.apiURL == "" {
+        return fmt.Errorf("LOTUS_API_URL is not set")
     }
 
-    // Prepare request body
-    reqBody := map[string]interface{}{
+    // Parse multiaddr
+    maddr, err := multiaddr.NewMultiaddr(c.apiURL)
+    if err != nil {
+        return fmt.Errorf("invalid multiaddr: %v", err)
+    }
+
+    // Extract host and port
+    var host, port string
+    multiaddr.ForEach(maddr, func(comp multiaddr.Component) bool {
+        switch comp.Protocol().Code {
+        case multiaddr.P_IP4, multiaddr.P_IP6:
+            host = comp.Value()
+        case multiaddr.P_TCP:
+            port = comp.Value()
+        }
+        return true
+    })
+
+    if host == "" || port == "" {
+        return fmt.Errorf("invalid multiaddr: missing host or port")
+    }
+
+    // Construct HTTP URL
+    httpURL := fmt.Sprintf("http://%s:%s/rpc/v0", host, port)
+
+    requestBody, err := json.Marshal(map[string]interface{}{
         "jsonrpc": "2.0",
         "method":  method,
         "params":  params,
         "id":     1,
-    }
-    reqBytes, err := json.Marshal(reqBody)
+    })
     if err != nil {
-        return fmt.Errorf("failed to marshal request: %v", err)
+        return fmt.Errorf("failed to marshal request: %w", err)
     }
 
-    // Create request
-    req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(reqBytes))
+    req, err := http.NewRequestWithContext(ctx, "POST", httpURL, bytes.NewBuffer(requestBody))
     if err != nil {
-        return fmt.Errorf("failed to create request: %v", err)
+        return fmt.Errorf("failed to create request: %w", err)
     }
 
-    // Set headers
     req.Header.Set("Content-Type", "application/json")
     if c.token != "" {
         req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
     }
 
-    // Make request
     resp, err := c.httpClient.Do(req)
     if err != nil {
-        return fmt.Errorf("failed to make request: %v", err)
+        return fmt.Errorf("failed to send request: %w", err)
     }
     defer resp.Body.Close()
 
-    // Parse response
-    var rpcResp struct {
-        JSONRPC string          `json:"jsonrpc"`
-        Result  json.RawMessage `json:"result"`
-        Error   *struct {
-            Code    int    `json:"code"`
-            Message string `json:"message"`
-        } `json:"error,omitempty"`
-        ID int `json:"id"`
-    }
-    if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-        return fmt.Errorf("failed to decode response: %v", err)
+    if resp.StatusCode != http.StatusOK {
+        return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
     }
 
-    // Check for RPC error
-    if rpcResp.Error != nil {
-        return fmt.Errorf("RPC error: %s (code: %d)", rpcResp.Error.Message, rpcResp.Error.Code)
+    var rpcResponse struct {
+        Error  *struct{ Message string } `json:"error,omitempty"`
+        Result json.RawMessage         `json:"result,omitempty"`
     }
 
-    // Unmarshal result
-    if err := json.Unmarshal(rpcResp.Result, result); err != nil {
-        return fmt.Errorf("failed to unmarshal result: %v", err)
+    if err := json.NewDecoder(resp.Body).Decode(&rpcResponse); err != nil {
+        return fmt.Errorf("failed to decode response: %w", err)
+    }
+
+    if rpcResponse.Error != nil {
+        return fmt.Errorf("RPC error: %s", rpcResponse.Error.Message)
+    }
+
+    if err := json.Unmarshal(rpcResponse.Result, result); err != nil {
+        return fmt.Errorf("failed to unmarshal result: %w", err)
     }
 
     return nil
-}
-
-// callRPCWithRetry makes a JSON-RPC call to the Lotus API with retry
-func (c *Client) callRPCWithRetry(ctx context.Context, method string, params interface{}, result interface{}) error {
-    var err error
-    for i := 0; i < 3; i++ {
-        err = c.callRPC(ctx, method, params, result)
-        if err == nil {
-            break
-        }
-    }
-    return err
 }
 
 // ListSectors lists all sectors for a miner
@@ -216,10 +250,47 @@ func (c *Client) GetMinerInfo(ctx context.Context, minerID string) (map[string]i
     }
 
     var result map[string]interface{}
-    err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerInfo", []interface{}{minerID, nil}, &result)
-    if err != nil {
+    params := []interface{}{minerID, nil}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerInfo", params, &result); err != nil {
         return nil, fmt.Errorf("failed to get miner info: %w", err)
     }
+
+    // Get miner sectors info
+    var sectorsInfo map[string]interface{}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerSectors", params, &sectorsInfo); err == nil {
+        result["SectorsInfo"] = sectorsInfo
+    }
+
+    // Get miner proving deadline info
+    var deadlineInfo map[string]interface{}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerProvingDeadline", params, &deadlineInfo); err == nil {
+        result["DeadlineInfo"] = deadlineInfo
+    }
+
+    // Get miner available balance
+    var availableBalance string
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerAvailableBalance", params, &availableBalance); err == nil {
+        result["AvailableBalance"] = availableBalance
+    }
+
+    // Get miner vesting funds
+    var vestingFunds map[string]interface{}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerVestingFunds", params, &vestingFunds); err == nil {
+        result["VestingFunds"] = vestingFunds
+    }
+
+    // Get miner faults
+    var faults []uint64
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerFaults", params, &faults); err == nil {
+        result["Faults"] = faults
+    }
+
+    // Get miner recoveries
+    var recoveries []uint64
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerRecoveries", params, &recoveries); err == nil {
+        result["Recoveries"] = recoveries
+    }
+
     return result, nil
 }
 
@@ -260,8 +331,8 @@ func (c *Client) GetMinerFaults(ctx context.Context, minerID string) ([]uint64, 
 }
 
 // GetMinerDeadlines gets the deadlines information of a miner
-func (c *Client) GetMinerDeadlines(ctx context.Context, minerID string) (map[string]interface{}, error) {
-    var result map[string]interface{}
+func (c *Client) GetMinerDeadlines(ctx context.Context, minerID string) ([]map[string]interface{}, error) {
+    var result []map[string]interface{}
     params := []interface{}{minerID, nil}
     
     if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerDeadlines", params, &result); err != nil {
@@ -313,9 +384,8 @@ func (c *Client) GetMinerInitialPledgeCollateral(ctx context.Context, minerID st
     params := []interface{}{minerID, sectorNumber, nil}
     
     if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerInitialPledgeCollateral", params, &result); err != nil {
-        return "", err
+        return "", fmt.Errorf("failed to get initial pledge: %v", err)
     }
-
     return result, nil
 }
 
@@ -376,50 +446,81 @@ func (c *Client) GetMinerBeneficiaryAddress(ctx context.Context, minerID string)
     return beneficiary, nil
 }
 
+type controlAddress struct {
+    Address string `json:"address"`
+    Balance string `json:"balance"`
+    ID      string `json:"id,omitempty"`
+}
+
+// Response represents a standardized API response
+type Response struct {
+    Version   string      `json:"version"`
+    Timestamp int64       `json:"timestamp"`
+    Status    string      `json:"status"`
+    Data      *MinerInfo  `json:"data"`
+}
+
 // MinerInfo represents comprehensive information about a miner
 type MinerInfo struct {
-    // Basic Information
-    BasicInfo         map[string]interface{} `json:"basic_info"`
-    SectorSize       uint64                 `json:"sector_size"`
-    WindowPoStProofType uint64              `json:"window_post_proof_type"`
-    
-    // Addresses
-    WorkerAddress    string                 `json:"worker_address"`
-    OwnerAddress     string                 `json:"owner_address"`
-    Beneficiary      string                 `json:"beneficiary"`
-    ControlAddresses []string               `json:"control_addresses"`
-    
-    // Power Information
-    Power            map[string]interface{} `json:"power"`
-    RawBytePower     string                 `json:"raw_byte_power"`
-    QualityAdjPower  string                 `json:"quality_adj_power"`
-    NetworkPowerShare float64               `json:"network_power_share"`
-    
-    // Financial Information
-    AvailableBalance string                 `json:"available_balance"`
-    InitialPledge    string                 `json:"initial_pledge"`
-    PreCommitDeposits string                `json:"pre_commit_deposits"`
-    VestingFunds     string                 `json:"vesting_funds"`
-    TotalLocked      string                 `json:"total_locked"`
-    
-    // Sector Information
-    TotalSectors     uint64                 `json:"total_sectors"`
-    ActiveSectors    uint64                 `json:"active_sectors"`
-    FaultySectors    []uint64               `json:"faulty_sectors"`
-    RecoveringSectors []uint64              `json:"recovering_sectors"`
-    LiveSectors      []uint64               `json:"live_sectors"`
-    
-    // Deadline Information
-    CurrentDeadline  uint64                 `json:"current_deadline"`
-    CurrentEpoch     uint64                 `json:"current_epoch"`
-    ProvingPeriodStart uint64              `json:"proving_period_start"`
-    Deadlines        map[string]interface{} `json:"deadlines"`
-    ProvingDeadline  map[string]interface{} `json:"proving_deadline"`
-    
-    // Performance Metrics
-    QualityAdjPowerPerSector string         `json:"quality_adj_power_per_sector"`
-    ConsensusMiners         uint64          `json:"consensus_miners"`
-    MinerUptime            float64         `json:"miner_uptime"`
+    ID                string   `json:"id"`
+    Robust            string   `json:"robust"`
+    Actor             string   `json:"actor"`
+    CreateHeight      uint64   `json:"createHeight"`
+    CreateTimestamp   int64    `json:"createTimestamp"`
+    LastSeenHeight    uint64   `json:"lastSeenHeight"`
+    LastSeenTimestamp int64    `json:"lastSeenTimestamp"`
+    Balance           string   `json:"balance"`
+    MessageCount      uint64   `json:"messageCount"`
+    TransferCount     uint64   `json:"transferCount"`
+    TokenTransferCount uint64   `json:"tokenTransferCount"`
+    Timestamp         int64    `json:"timestamp"`
+    Tokens           uint64   `json:"tokens"`
+    Miner            struct {
+        Owner struct {
+            Address string `json:"address"`
+            Balance string `json:"balance"`
+            ID      string `json:"id,omitempty"`
+        } `json:"owner"`
+        Worker struct {
+            Address string `json:"address"`
+            Balance string `json:"balance"`
+            ID      string `json:"id,omitempty"`
+        } `json:"worker"`
+        Beneficiary struct {
+            Address string `json:"address"`
+            Balance string `json:"balance"`
+            ID      string `json:"id,omitempty"`
+        } `json:"beneficiary"`
+        ControlAddresses []controlAddress `json:"controlAddresses"`
+        PeerID          string   `json:"peerId"`
+        MultiAddresses  []string `json:"multiAddresses"`
+        SectorSize      uint64   `json:"sectorSize"`
+        RawBytePower    string   `json:"rawBytePower"`
+        QualityAdjPower string   `json:"qualityAdjPower"`
+        NetworkRawBytePower     string   `json:"networkRawBytePower"`
+        NetworkQualityAdjPower  string   `json:"networkQualityAdjPower"`
+        BlocksMined             uint64   `json:"blocksMined"`
+        WeightedBlocksMined     uint64   `json:"weightedBlocksMined"`
+        TotalRewards           string   `json:"totalRewards"`
+        Sectors struct {
+            Live      uint64 `json:"live"`
+            Active    uint64 `json:"active"`
+            Faulty    uint64 `json:"faulty"`
+            Recovering uint64 `json:"recovering"`
+        } `json:"sectors"`
+        PreCommitDeposits         string   `json:"preCommitDeposits"`
+        VestingFunds             string   `json:"vestingFunds"`
+        InitialPledgeRequirement string   `json:"initialPledgeRequirement"`
+        AvailableBalance        string   `json:"availableBalance"`
+        SectorPledgeBalance     string   `json:"sectorPledgeBalance"`
+        PledgeBalance          string   `json:"pledgeBalance"`
+        RawBytePowerRank       uint64   `json:"rawBytePowerRank"`
+        QualityAdjPowerRank    uint64   `json:"qualityAdjPowerRank"`
+    } `json:"miner"`
+    OwnedMiners     []string `json:"ownedMiners"`
+    WorkerMiners    []string `json:"workerMiners"`
+    BenefitedMiners []string `json:"benefitedMiners"`
+    Address         string   `json:"address"`
 }
 
 // GetComprehensiveMinerInfo gets all available information about a miner
@@ -428,183 +529,350 @@ func (c *Client) GetComprehensiveMinerInfo(ctx context.Context, minerID string) 
         return nil, errors.New("miner ID cannot be empty")
     }
 
-    var info MinerInfo
-    g, ctx := errgroup.WithContext(ctx)
+    // 创建基础信息结构
+    info := &MinerInfo{
+        ID:                minerID,
+        Actor:             "storageminer",
+        Address:          minerID,
+        OwnedMiners:      make([]string, 0),
+        WorkerMiners:     make([]string, 0),
+        BenefitedMiners:  make([]string, 0),
+        TokenTransferCount: 0,
+        Tokens:            0,
+        Timestamp:        time.Now().Unix(),
+    }
 
-    // Get basic miner info
-    g.Go(func() error {
-        basicInfo, err := c.GetMinerInfo(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get basic info: %w", err)
-        }
-        info.BasicInfo = basicInfo
-        
-        // Extract specific fields from basic info
-        if sectorSize, ok := basicInfo["SectorSize"].(uint64); ok {
-            info.SectorSize = sectorSize
-        }
-        if proofType, ok := basicInfo["WindowPoStProofType"].(uint64); ok {
-            info.WindowPoStProofType = proofType
-        }
-        if controlAddrs, ok := basicInfo["ControlAddresses"].([]string); ok {
-            info.ControlAddresses = controlAddrs
-        }
-        return nil
-    })
+    // 获取必需的基础信息（同步）
+    basicInfo, err := c.GetMinerInfo(ctx, minerID)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get basic info: %w", err)
+    }
 
-    // Get power information
-    g.Go(func() error {
-        power, err := c.GetMinerPower(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get power info: %w", err)
-        }
-        info.Power = power
-        
-        // Extract and calculate power metrics
-        if minerPower, ok := power["MinerPower"].(map[string]interface{}); ok {
-            info.RawBytePower = minerPower["RawBytePower"].(string)
-            info.QualityAdjPower = minerPower["QualityAdjPower"].(string)
+    if err := c.processBasicInfo(ctx, info, basicInfo); err != nil {
+        return nil, err
+    }
+
+    actorInfo, err := c.GetActorInfo(ctx, minerID)
+    if err != nil {
+        return nil, fmt.Errorf("failed to get actor info: %w", err)
+    }
+
+    if err := c.processActorInfo(info, actorInfo); err != nil {
+        return nil, err
+    }
+
+    // 创建带缓冲的通道控制并发
+    maxConcurrency := 5
+    semaphore := make(chan struct{}, maxConcurrency)
+    defer close(semaphore)
+
+    // 并发任务组
+    tasks := []struct {
+        name string
+        fn   func() error
+    }{
+        {"robust_address", func() error {
+            addr, err := c.GetRobustAddress(ctx, minerID)
+            if err == nil {
+                info.Robust = addr
+            }
+            return err
+        }},
+        {"actor_state", func() error {
+            state, err := c.GetActorState(ctx, minerID)
+            if err == nil {
+                c.processActorState(ctx, info, state)
+            }
+            return err
+        }},
+        {"power_info", func() error {
+            power, err := c.GetMinerPower(ctx, minerID)
+            if err == nil {
+                c.processPowerInfo(info, power)
+            }
+            return err
+        }},
+        {"sector_info", func() error {
+            params := []interface{}{minerID, nil}
+            var sectorsInfo []map[string]interface{}
+            if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerSectors", params, &sectorsInfo); err == nil {
+                info.Miner.Sectors.Live = uint64(len(sectorsInfo))
+                info.Miner.Sectors.Active = uint64(len(sectorsInfo))
+            }
+            return err
+        }},
+        {"faults", func() error {
+            faults, err := c.GetMinerFaults(ctx, minerID)
+            if err == nil {
+                info.Miner.Sectors.Faulty = uint64(len(faults))
+            }
+            return err
+        }},
+        {"financial_info", func() error {
+            balance, err := c.GetMinerAvailableBalance(ctx, minerID)
+            if err == nil {
+                info.Miner.AvailableBalance = balance
+            }
+            pledge, err := c.GetMinerPledgeCollateral(ctx, minerID)
+            if err == nil {
+                info.Miner.InitialPledgeRequirement = pledge
+                info.Miner.SectorPledgeBalance = pledge
+                info.Miner.PledgeBalance = pledge
+            }
+            return err
+        }},
+        {"power_rank", func() error {
+            rawRank, qualityRank, err := c.GetMinerPowerRank(ctx, minerID)
+            if err == nil {
+                info.Miner.RawBytePowerRank = rawRank
+                info.Miner.QualityAdjPowerRank = qualityRank
+            }
+            return err
+        }},
+        {"chain_head", func() error {
+            head, err := c.GetChainHead(ctx)
+            if err == nil {
+                c.processChainHead(info, head)
+            }
+            return err
+        }},
+    }
+
+    // 并发执行任务
+    var wg sync.WaitGroup
+    for _, task := range tasks {
+        wg.Add(1)
+        go func(t struct {
+            name string
+            fn   func() error
+        }) {
+            defer wg.Done()
             
-            // Calculate network power share
-            if totalPower, ok := power["TotalPower"].(map[string]interface{}); ok {
-                if totalRaw, ok := totalPower["RawBytePower"].(string); ok {
-                    info.NetworkPowerShare = calculatePowerShare(info.RawBytePower, totalRaw)
+            // 获取并发信号量
+            semaphore <- struct{}{}
+            defer func() { <-semaphore }()
+
+            c.asyncRetry(ctx, t.name, info, t.fn)
+        }(task)
+    }
+
+    // 等待所有任务完成或超时
+    done := make(chan struct{})
+    go func() {
+        wg.Wait()
+        close(done)
+    }()
+
+    select {
+    case <-done:
+        // 所有任务完成
+        return info, nil
+    case <-time.After(30 * time.Second):
+        // 超时处理
+        return info, fmt.Errorf("miner info retrieval timed out after 30 seconds")
+    case <-ctx.Done():
+        return nil, ctx.Err()
+    }
+}
+
+// asyncRetry 改进版异步重试函数
+func (c *Client) asyncRetry(ctx context.Context, name string, info *MinerInfo, fn func() error) {
+    go func() {
+        retries := 3
+        backoff := time.Second
+        
+        for i := 0; i < retries; i++ {
+            // 检查上下文是否已取消
+            select {
+            case <-ctx.Done():
+                return
+            default:
+            }
+
+            err := fn()
+            if err == nil {
+                return
+            }
+
+            // 判断是否可重试的错误
+            if !isRetryableError(err) {
+                fmt.Printf("Non-retryable error for %s: %v\n", name, err)
+                return
+            }
+
+            // 如果不是最后一次重试，等待后继续
+            if i < retries-1 {
+                fmt.Printf("Warning: %s failed, retrying in %v: %v\n", name, backoff, err)
+                time.Sleep(backoff)
+                backoff *= 2 // 指数退避
+            } else {
+                fmt.Printf("Error: %s failed after %d retries: %v\n", name, retries, err)
+            }
+        }
+    }()
+}
+
+// isRetryableError 判断是否为可重试的错误
+func isRetryableError(err error) bool {
+    if err == nil {
+        return false
+    }
+    
+    // 网络和RPC相关的可重试错误
+    retryableErrors := []string{
+        "connection reset", 
+        "connection refused", 
+        "timeout", 
+        "i/o timeout", 
+        "EOF", 
+        "network is unreachable", 
+        "500", 
+        "503", 
+        "504",
+    }
+    
+    errStr := strings.ToLower(err.Error())
+    for _, retryErr := range retryableErrors {
+        if strings.Contains(errStr, retryErr) {
+            return true
+        }
+    }
+    
+    return false
+}
+
+// Process basic miner info
+func (c *Client) processBasicInfo(ctx context.Context, info *MinerInfo, basicInfo map[string]interface{}) error {
+    // Process owner info
+    if owner, ok := basicInfo["Owner"].(string); ok {
+        info.Miner.Owner.Address = owner
+        if balance, err := c.GetBalance(ctx, owner); err == nil {
+            info.Miner.Owner.Balance = balance
+        }
+    } else {
+        return fmt.Errorf("owner address not found")
+    }
+
+    // Process worker info
+    if worker, ok := basicInfo["Worker"].(string); ok {
+        info.Miner.Worker.Address = worker
+        if balance, err := c.GetBalance(ctx, worker); err == nil {
+            info.Miner.Worker.Balance = balance
+        }
+    } else {
+        return fmt.Errorf("worker address not found")
+    }
+
+    // Process beneficiary info
+    if beneficiary, ok := basicInfo["Beneficiary"].(string); ok {
+        info.Miner.Beneficiary.Address = beneficiary
+        if balance, err := c.GetBalance(ctx, beneficiary); err == nil {
+            info.Miner.Beneficiary.Balance = balance
+        }
+    }
+
+    // Process control addresses
+    if controlAddrs, ok := basicInfo["ControlAddresses"].([]interface{}); ok {
+        info.Miner.ControlAddresses = make([]controlAddress, 0)
+        for _, addr := range controlAddrs {
+            if str, ok := addr.(string); ok {
+                balance, _ := c.GetBalance(ctx, str)
+                info.Miner.ControlAddresses = append(info.Miner.ControlAddresses, controlAddress{
+                    Address: str,
+                    Balance: balance,
+                })
+            }
+        }
+    }
+
+    // Process sector size
+    if sectorSize, ok := basicInfo["SectorSize"].(uint64); ok {
+        info.Miner.SectorSize = sectorSize
+    }
+
+    return nil
+}
+
+// Process actor info
+func (c *Client) processActorInfo(info *MinerInfo, actorInfo map[string]interface{}) error {
+    if balance, ok := actorInfo["Balance"].(string); ok {
+        info.Balance = balance
+    }
+    if nonce, ok := actorInfo["Nonce"].(float64); ok {
+        info.MessageCount = uint64(nonce)
+    }
+    return nil
+}
+
+// Process actor state
+func (c *Client) processActorState(ctx context.Context, info *MinerInfo, actorState map[string]interface{}) {
+    if state, ok := actorState["State"].(map[string]interface{}); ok {
+        if provingPeriodStart, ok := state["ProvingPeriodStart"].(float64); ok {
+            info.CreateHeight = uint64(provingPeriodStart)
+            // Get create timestamp
+            if tipset, err := c.GetTipSetByHeight(ctx, uint64(provingPeriodStart)); err == nil {
+                if blocks, ok := tipset["Blocks"].([]interface{}); ok && len(blocks) > 0 {
+                    if block, ok := blocks[0].(map[string]interface{}); ok {
+                        if timestamp, ok := block["Timestamp"].(float64); ok {
+                            info.CreateTimestamp = int64(timestamp)
+                        }
+                    }
                 }
             }
         }
-        return nil
-    })
+        // Get transfer count from state
+        if withdrawalBalance, ok := state["WithdrawBalance"].(string); ok && withdrawalBalance != "0" {
+            info.TransferCount++
+        }
+    }
+}
 
-    // Get financial information
-    g.Go(func() error {
-        balance, err := c.GetMinerAvailableBalance(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get available balance: %w", err)
+// Process power info
+func (c *Client) processPowerInfo(info *MinerInfo, minerPower map[string]interface{}) {
+    if rawPower, ok := minerPower["MinerPower"].(map[string]interface{}); ok {
+        if raw, ok := rawPower["RawBytePower"].(string); ok {
+            info.Miner.RawBytePower = raw
         }
-        info.AvailableBalance = balance
+        if quality, ok := rawPower["QualityAdjPower"].(string); ok {
+            info.Miner.QualityAdjPower = quality
+        }
+    }
+    if totalPower, ok := minerPower["TotalPower"].(map[string]interface{}); ok {
+        if raw, ok := totalPower["RawBytePower"].(string); ok {
+            info.Miner.NetworkRawBytePower = raw
+        }
+        if quality, ok := totalPower["QualityAdjPower"].(string); ok {
+            info.Miner.NetworkQualityAdjPower = quality
+        }
+    }
+}
 
-        // Get initial pledge
-        var initialPledge interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerInitialPledgeCollateral", []interface{}{minerID, nil}, &initialPledge)
-        if err != nil {
-            return fmt.Errorf("failed to get initial pledge: %w", err)
+// Process chain head info
+func (c *Client) processChainHead(info *MinerInfo, chainHead map[string]interface{}) {
+    if height, ok := chainHead["Height"].(float64); ok {
+        info.LastSeenHeight = uint64(height)
+        if blocks, ok := chainHead["Blocks"].([]interface{}); ok && len(blocks) > 0 {
+            if block, ok := blocks[0].(map[string]interface{}); ok {
+                if timestamp, ok := block["Timestamp"].(float64); ok {
+                    info.LastSeenTimestamp = int64(timestamp)
+                }
+            }
         }
-        if pledge, ok := initialPledge.(string); ok {
-            info.InitialPledge = pledge
-        }
+    }
+}
 
-        // Get pre-commit deposits
-        var preCommitDeposits interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerPreCommitDeposit", []interface{}{minerID, nil}, &preCommitDeposits)
-        if err != nil {
-            return fmt.Errorf("failed to get pre-commit deposits: %w", err)
-        }
-        if deposits, ok := preCommitDeposits.(string); ok {
-            info.PreCommitDeposits = deposits
-        }
-
-        // Get vesting funds
-        var vestingFunds interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerVestingFunds", []interface{}{minerID, nil}, &vestingFunds)
-        if err != nil {
-            return fmt.Errorf("failed to get vesting funds: %w", err)
-        }
-        if vesting, ok := vestingFunds.(string); ok {
-            info.VestingFunds = vesting
-        }
-
-        return nil
-    })
-
-    // Get sector information
-    g.Go(func() error {
-        // Get faulty sectors
-        faults, err := c.GetMinerFaults(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get faults: %w", err)
-        }
-        info.FaultySectors = faults
-
-        // Get recovering sectors
-        var recoveringSectors interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerRecoveringSectors", []interface{}{minerID, nil}, &recoveringSectors)
-        if err != nil {
-            return fmt.Errorf("failed to get recovering sectors: %w", err)
-        }
-        if recovering, ok := recoveringSectors.([]uint64); ok {
-            info.RecoveringSectors = recovering
-        }
-
-        // Get live sectors
-        var liveSectors interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerActiveSectors", []interface{}{minerID, nil}, &liveSectors)
-        if err != nil {
-            return fmt.Errorf("failed to get live sectors: %w", err)
-        }
-        if live, ok := liveSectors.([]uint64); ok {
-            info.LiveSectors = live
-            info.TotalSectors = uint64(len(live))
-            info.ActiveSectors = info.TotalSectors - uint64(len(info.FaultySectors))
-        }
-
-        return nil
-    })
-
-    // Get deadline information
-    g.Go(func() error {
-        deadlines, err := c.GetMinerDeadlines(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get deadlines: %w", err)
-        }
-        info.Deadlines = deadlines
-
-        provingDeadline, err := c.GetMinerProvingDeadline(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get proving deadline: %w", err)
-        }
-        info.ProvingDeadline = provingDeadline
-
-        if epoch, ok := provingDeadline["CurrentEpoch"].(uint64); ok {
-            info.CurrentEpoch = epoch
-        }
-        if deadline, ok := provingDeadline["DeadlineIndex"].(uint64); ok {
-            info.CurrentDeadline = deadline
-        }
-        if start, ok := provingDeadline["PeriodStart"].(uint64); ok {
-            info.ProvingPeriodStart = start
-        }
-
-        return nil
-    })
-
-    // Get addresses
-    g.Go(func() error {
-        worker, err := c.GetMinerWorkerAddress(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get worker address: %w", err)
-        }
-        info.WorkerAddress = worker
-
-        owner, err := c.GetMinerOwnerAddress(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get owner address: %w", err)
-        }
-        info.OwnerAddress = owner
-
-        beneficiary, err := c.GetMinerBeneficiaryAddress(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get beneficiary address: %w", err)
-        }
-        info.Beneficiary = beneficiary
-
-        return nil
-    })
-
-    if err := g.Wait(); err != nil {
-        return &info, fmt.Errorf("failed to get comprehensive miner info: %w", err)
+// GetBalance gets the balance of an address
+func (c *Client) GetBalance(ctx context.Context, address string) (string, error) {
+    if address == "" {
+        return "0", nil
     }
 
-    return &info, nil
+    var result string
+    if err := c.callRPCWithRetry(ctx, "Filecoin.WalletBalance", []interface{}{address}, &result); err != nil {
+        return "0", fmt.Errorf("failed to get balance: %w", err)
+    }
+
+    return result, nil
 }
 
 // calculatePowerShare calculates the percentage of network power
@@ -694,25 +962,172 @@ func (c *Client) GetMinerStats(ctx context.Context, minerID string) (map[string]
     }
 
     // Format and add statistics
-    stats["Raw Power"] = formatBytes(info.RawBytePower)
-    stats["Quality-Adjusted Power"] = formatBytes(info.QualityAdjPower)
-    stats["Network Power Share"] = fmt.Sprintf("%.4f%%", info.NetworkPowerShare*100)
-    stats["Available Balance"] = formatAttoFil(info.AvailableBalance)
-    stats["Initial Pledge"] = formatAttoFil(info.InitialPledge)
-    stats["Pre-Commit Deposits"] = formatAttoFil(info.PreCommitDeposits)
-    stats["Vesting Funds"] = formatAttoFil(info.VestingFunds)
-    stats["Total Locked"] = formatAttoFil(info.TotalLocked)
-    stats["Total Sectors"] = fmt.Sprintf("%d", info.TotalSectors)
-    stats["Active Sectors"] = fmt.Sprintf("%d", info.ActiveSectors)
-    stats["Faulty Sectors"] = fmt.Sprintf("%d", len(info.FaultySectors))
-    stats["Recovering Sectors"] = fmt.Sprintf("%d", len(info.RecoveringSectors))
-    stats["Live Sectors"] = fmt.Sprintf("%d", len(info.LiveSectors))
-    stats["Current Deadline"] = fmt.Sprintf("%d", info.CurrentDeadline)
-    stats["Current Epoch"] = fmt.Sprintf("%d", info.CurrentEpoch)
-    stats["Proving Period Start"] = fmt.Sprintf("%d", info.ProvingPeriodStart)
-    stats["Quality-Adjusted Power/Sector"] = formatBytes(info.QualityAdjPowerPerSector)
-    stats["Consensus Miners"] = fmt.Sprintf("%d", info.ConsensusMiners)
-    stats["Miner Uptime"] = fmt.Sprintf("%.2f%%", info.MinerUptime*100)
+    stats["Raw Power"] = formatBytes(info.Miner.RawBytePower)
+    stats["Quality-Adjusted Power"] = formatBytes(info.Miner.QualityAdjPower)
+    stats["Network Power Share"] = fmt.Sprintf("%.4f%%", calculatePowerShare(info.Miner.RawBytePower, info.Miner.NetworkRawBytePower)*100)
+    stats["Available Balance"] = formatAttoFil(info.Miner.AvailableBalance)
+    stats["Total Sectors"] = fmt.Sprintf("%d", info.Miner.Sectors.Live+info.Miner.Sectors.Active+info.Miner.Sectors.Faulty+info.Miner.Sectors.Recovering)
+    stats["Active Sectors"] = fmt.Sprintf("%d", info.Miner.Sectors.Active)
+    stats["Faulty Sectors"] = fmt.Sprintf("%d", info.Miner.Sectors.Faulty)
+    stats["Recovering Sectors"] = fmt.Sprintf("%d", info.Miner.Sectors.Recovering)
+    stats["Live Sectors"] = fmt.Sprintf("%d", info.Miner.Sectors.Live)
+    stats["Blocks Mined"] = fmt.Sprintf("%d", info.Miner.BlocksMined)
+    stats["Weighted Blocks Mined"] = fmt.Sprintf("%d", info.Miner.WeightedBlocksMined)
+    stats["Total Rewards"] = formatAttoFil(info.Miner.TotalRewards)
+    stats["Quality-Adjusted Power/Sector"] = formatBytes(info.Miner.QualityAdjPower)
 
     return stats, nil
+}
+
+// GetActorInfo gets information about an actor
+func (c *Client) GetActorInfo(ctx context.Context, address string) (map[string]interface{}, error) {
+    var result map[string]interface{}
+    params := []interface{}{address, nil}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateGetActor", params, &result); err != nil {
+        return nil, fmt.Errorf("failed to get actor info: %w", err)
+    }
+    return result, nil
+}
+
+// GetActorState gets the state of an actor
+func (c *Client) GetActorState(ctx context.Context, address string) (map[string]interface{}, error) {
+    var result map[string]interface{}
+    params := []interface{}{address, nil}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateReadState", params, &result); err != nil {
+        return nil, fmt.Errorf("failed to get actor state: %w", err)
+    }
+    return result, nil
+}
+
+// GetAddressInfo gets information about an address
+func (c *Client) GetAddressInfo(ctx context.Context, address string) (map[string]interface{}, error) {
+    var result map[string]interface{}
+    params := []interface{}{address, nil}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateGetActor", params, &result); err != nil {
+        return nil, fmt.Errorf("failed to get address info: %w", err)
+    }
+    return result, nil
+}
+
+// GetChainHead gets the current chain head
+func (c *Client) GetChainHead(ctx context.Context) (map[string]interface{}, error) {
+    var result map[string]interface{}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.ChainHead", nil, &result); err != nil {
+        return nil, fmt.Errorf("failed to get chain head: %w", err)
+    }
+    return result, nil
+}
+
+// GetTipSetByHeight gets the tipset at the specified height
+func (c *Client) GetTipSetByHeight(ctx context.Context, height uint64) (map[string]interface{}, error) {
+    var result map[string]interface{}
+    params := []interface{}{height, nil}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.ChainGetTipSetByHeight", params, &result); err != nil {
+        return nil, fmt.Errorf("failed to get tipset: %w", err)
+    }
+    return result, nil
+}
+
+// GetRobustAddress gets the robust address for a given ID address
+func (c *Client) GetRobustAddress(ctx context.Context, address string) (string, error) {
+    var result string
+    params := []interface{}{address, nil}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateLookupRobustAddress", params, &result); err != nil {
+        return "", fmt.Errorf("failed to get robust address: %w", err)
+    }
+    return result, nil
+}
+
+// GetMinerPledgeBalance gets the miner's sector pledge balance
+func (c *Client) GetMinerPledgeBalance(ctx context.Context, minerAddr string) (string, error) {
+    var result string
+    params := []interface{}{minerAddr, nil}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerPreCommitDeposit", params, &result); err != nil {
+        return "", fmt.Errorf("failed to get miner pledge balance: %w", err)
+    }
+    return result, nil
+}
+
+// GetMinerPledgeCollateral gets the pledge collateral for a miner
+func (c *Client) GetMinerPledgeCollateral(ctx context.Context, minerAddr string) (string, error) {
+    var result string
+    params := []interface{}{minerAddr, nil}
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerInitialPledgeCollateral", params, &result); err != nil {
+        return "", fmt.Errorf("failed to get miner pledge collateral: %w", err)
+    }
+    return result, nil
+}
+
+// GetMinerPowerRank gets the miner's power rank information
+func (c *Client) GetMinerPowerRank(ctx context.Context, minerAddr string) (uint64, uint64, error) {
+    var result struct {
+        MinerPower struct {
+            RawBytePower    string
+            QualityAdjPower string
+        }
+        TotalPower struct {
+            RawBytePower    string
+            QualityAdjPower string
+        }
+    }
+
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerPower", []interface{}{minerAddr, nil}, &result); err != nil {
+        return 0, 0, fmt.Errorf("failed to get miner power: %w", err)
+    }
+
+    // Get all miners power
+    var allMiners []string
+    if err := c.callRPCWithRetry(ctx, "Filecoin.StateListMiners", []interface{}{nil}, &allMiners); err != nil {
+        return 0, 0, fmt.Errorf("failed to list miners: %w", err)
+    }
+
+    type minerPower struct {
+        miner    string
+        rawBytes string
+        adjPower string
+    }
+
+    var powers []minerPower
+    for _, miner := range allMiners {
+        var mp struct {
+            MinerPower struct {
+                RawBytePower    string
+                QualityAdjPower string
+            }
+        }
+        if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerPower", []interface{}{miner, nil}, &mp); err != nil {
+            continue
+        }
+        powers = append(powers, minerPower{
+            miner:    miner,
+            rawBytes: mp.MinerPower.RawBytePower,
+            adjPower: mp.MinerPower.QualityAdjPower,
+        })
+    }
+
+    // Sort by raw byte power
+    sort.Slice(powers, func(i, j int) bool {
+        return powers[i].rawBytes > powers[j].rawBytes
+    })
+    rawRank := uint64(1)
+    for i, p := range powers {
+        if p.miner == minerAddr {
+            rawRank = uint64(i + 1)
+            break
+        }
+    }
+
+    // Sort by quality adjusted power
+    sort.Slice(powers, func(i, j int) bool {
+        return powers[i].adjPower > powers[j].adjPower
+    })
+    adjRank := uint64(1)
+    for i, p := range powers {
+        if p.miner == minerAddr {
+            adjRank = uint64(i + 1)
+            break
+        }
+    }
+
+    return rawRank, adjRank, nil
 }

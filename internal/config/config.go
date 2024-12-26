@@ -75,10 +75,10 @@ func Load() (cfg *Config, err error) {
         }
 
         // Set values from environment variables
-        config.Lotus.APIURL = getEnvWithDefault("LOTUS_API_URL", "http://127.0.0.1:1234/rpc/v0")
+        config.Lotus.APIURL = getEnvWithDefault("LOTUS_API_URL", "/ip4/127.0.0.1/tcp/1234")
         config.Lotus.AuthToken = getEnvWithDefault("LOTUS_API_TOKEN", "")
-        config.Lotus.Timeout = getDurationEnvWithDefault("LOTUS_TIMEOUT", 30*time.Second)
-        config.THCloud.APIKey = getEnvWithDefault("THC_API_KEY", "")
+        config.Lotus.Timeout = getDurationEnvWithDefault("LOTUS_API_TIMEOUT", 30*time.Second)
+        config.THCloud.APIKey = getEnvWithDefault("THCLOUD_API_KEY", "")
 
         // Clear error if we successfully loaded the config
         err = nil

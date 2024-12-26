@@ -1,163 +1,173 @@
 package miner
 
 import (
-    "context"
+    "encoding/json"
     "fmt"
     "math/big"
     "strings"
     "time"
-
+    "github.com/jedib0t/go-pretty/v6/table"
     "github.com/spf13/cobra"
     "github.com/THCloudAI/thctl/internal/lotus"
+    "gopkg.in/yaml.v3"
 )
 
 func NewMinerCmd() *cobra.Command {
     cmd := &cobra.Command{
         Use:   "miner [minerID]",
         Short: "Get miner information",
-        Long: `Get comprehensive information about a Filecoin miner, including:
-- Basic information (addresses, sector size, proof type)
-- Power statistics (raw power, quality adjusted power, network share)
-- Financial information (balance, pledges, deposits)
-- Sector information (total, active, faulty sectors)
-- Deadline information and schedule
-- Performance metrics`,
-        Args: cobra.ExactArgs(1),
+        Args:  cobra.ExactArgs(1),
         RunE: func(cmd *cobra.Command, args []string) error {
             minerID := args[0]
-            return getMinerInfo(minerID)
+            output, _ := cmd.Flags().GetString("output")
+
+            client, err := lotus.NewFromEnv()
+            if err != nil {
+                return fmt.Errorf("❌ failed to create Lotus client: %v", err)
+            }
+
+            info, err := client.GetComprehensiveMinerInfo(cmd.Context(), minerID)
+            if err != nil {
+                return fmt.Errorf("❌ error getting miner info: %v", err)
+            }
+
+            // If any required fields are missing, return an error
+            if info.Miner.Owner.Address == "" || info.Miner.Worker.Address == "" {
+                return fmt.Errorf("❌ failed to get required miner information")
+            }
+
+            // Create standardized response
+            resp := &lotus.Response{
+                Version:   "1.0",
+                Timestamp: time.Now().Unix(),
+                Status:    "success",
+                Data:     info,
+            }
+
+            switch output {
+            case "json":
+                jsonBytes, err := json.MarshalIndent(resp, "", "  ")
+                if err != nil {
+                    return fmt.Errorf("❌ error marshaling JSON: %v", err)
+                }
+                fmt.Println(string(jsonBytes))
+            case "yaml":
+                yamlBytes, err := yaml.Marshal(resp)
+                if err != nil {
+                    return fmt.Errorf("❌ error marshaling YAML: %v", err)
+                }
+                fmt.Println(string(yamlBytes))
+            case "table":
+                printMinerInfoTable(minerID, info)
+            default:
+                return fmt.Errorf("❌ unsupported output format: %s", output)
+            }
+
+            return nil
         },
     }
 
-    // Add flags
-    cmd.PersistentFlags().StringP("output", "o", "json", "Output format: json, yaml, or table")
-
+    cmd.Flags().StringP("output", "o", "json", "Output format: json, yaml, or table")
     return cmd
 }
 
-func getMinerInfo(minerID string) error {
-    // Create Lotus client from environment
-    client := lotus.NewFromEnv()
-    if client == nil {
-        return fmt.Errorf("❌ failed to create Lotus client")
-    }
-
-    // Get comprehensive miner info
-    info, err := client.GetComprehensiveMinerInfo(context.Background(), minerID)
-    if err != nil {
-        // Check specific error types
-        switch {
-        case lotus.IsNotFound(err):
-            return fmt.Errorf("❌ miner %s not found", minerID)
-        case lotus.IsConnectionError(err):
-            return fmt.Errorf("❌ connection error: failed to connect to Lotus node")
-        case lotus.IsAuthError(err):
-            return fmt.Errorf("❌ authentication error: invalid or missing API token")
-        default:
-            return fmt.Errorf("❌ error getting miner info: %v", err)
-        }
-    }
-
-    // Display miner information in sections
+func printMinerInfoTable(minerID string, info *lotus.MinerInfo) {
     fmt.Printf("\n🔍 Miner Information for %s\n", minerID)
     fmt.Println(strings.Repeat("-", 50))
 
     // Basic Information
     fmt.Println("\n📋 Basic Information:")
-    fmt.Printf("   Sector Size: %s\n", formatBytes(fmt.Sprintf("%d", info.SectorSize)))
-    fmt.Printf("   Window PoSt Proof Type: %d\n", info.WindowPoStProofType)
-    fmt.Printf("   Owner Address: %s\n", info.OwnerAddress)
-    fmt.Printf("   Worker Address: %s\n", info.WorkerAddress)
-    fmt.Printf("   Beneficiary: %s\n", info.Beneficiary)
-    if len(info.ControlAddresses) > 0 {
-        fmt.Println("   Control Addresses:")
-        for _, addr := range info.ControlAddresses {
-            fmt.Printf("      - %s\n", addr)
-        }
-    }
+    t := table.NewWriter()
+    t.AppendHeader(table.Row{"Attribute", "Value"})
+    t.AppendRow(table.Row{"ID", info.ID})
+    t.AppendRow(table.Row{"Robust Address", info.Robust})
+    t.AppendRow(table.Row{"Actor Type", info.Actor})
+    t.AppendRow(table.Row{"Balance", formatFIL(info.Balance)})
+    t.AppendRow(table.Row{"Create Height", fmt.Sprintf("%d", info.CreateHeight)})
+    t.AppendRow(table.Row{"Create Time", time.Unix(info.CreateTimestamp, 0).Format(time.RFC3339)})
+    t.AppendRow(table.Row{"Last Seen Height", fmt.Sprintf("%d", info.LastSeenHeight)})
+    t.AppendRow(table.Row{"Last Seen Time", time.Unix(info.LastSeenTimestamp, 0).Format(time.RFC3339)})
+    t.AppendRow(table.Row{"Message Count", fmt.Sprintf("%d", info.MessageCount)})
+    t.AppendRow(table.Row{"Transfer Count", fmt.Sprintf("%d", info.TransferCount)})
+    t.AppendRow(table.Row{"Token Transfer Count", fmt.Sprintf("%d", info.TokenTransferCount)})
+    t.AppendRow(table.Row{"Tokens", fmt.Sprintf("%d", info.Tokens)})
+    fmt.Println(t.Render())
 
-    // Power Information
+    // Address Information
+    fmt.Println("\n📫 Address Information:")
+    t = table.NewWriter()
+    t.AppendHeader(table.Row{"Role", "Address", "Balance"})
+    t.AppendRow(table.Row{"Owner", info.Miner.Owner.Address, formatFIL(info.Miner.Owner.Balance)})
+    t.AppendRow(table.Row{"Worker", info.Miner.Worker.Address, formatFIL(info.Miner.Worker.Balance)})
+    t.AppendRow(table.Row{"Beneficiary", info.Miner.Beneficiary.Address, formatFIL(info.Miner.Beneficiary.Balance)})
+    for i, ctrl := range info.Miner.ControlAddresses {
+        t.AppendRow(table.Row{fmt.Sprintf("Control %d", i+1), ctrl.Address, formatFIL(ctrl.Balance)})
+    }
+    fmt.Println(t.Render())
+
+    // Power Statistics
     fmt.Println("\n💪 Power Statistics:")
-    fmt.Printf("   Raw Power: %s\n", formatBytes(info.RawBytePower))
-    fmt.Printf("   Quality Adjusted Power: %s\n", formatBytes(info.QualityAdjPower))
-    fmt.Printf("   Network Power Share: %.4f%%\n", info.NetworkPowerShare*100)
-    if info.QualityAdjPowerPerSector != "" {
-        fmt.Printf("   QAP Per Sector: %s\n", formatBytes(info.QualityAdjPowerPerSector))
-    }
-    if info.ConsensusMiners > 0 {
-        fmt.Printf("   Total Consensus Miners: %d\n", info.ConsensusMiners)
-    }
+    t = table.NewWriter()
+    t.AppendHeader(table.Row{"Attribute", "Value"})
+    t.AppendRow(table.Row{"Raw Power", formatBytes(info.Miner.RawBytePower)})
+    t.AppendRow(table.Row{"Quality Adjusted Power", formatBytes(info.Miner.QualityAdjPower)})
+    t.AppendRow(table.Row{"Network Raw Power", formatBytes(info.Miner.NetworkRawBytePower)})
+    t.AppendRow(table.Row{"Network Quality Power", formatBytes(info.Miner.NetworkQualityAdjPower)})
+    t.AppendRow(table.Row{"Network Power Share", fmt.Sprintf("%.4f%%", calculatePowerShare(info.Miner.RawBytePower, info.Miner.NetworkRawBytePower)*100)})
+    t.AppendRow(table.Row{"Raw Power Rank", fmt.Sprintf("%d", info.Miner.RawBytePowerRank)})
+    t.AppendRow(table.Row{"Quality Power Rank", fmt.Sprintf("%d", info.Miner.QualityAdjPowerRank)})
+    fmt.Println(t.Render())
 
     // Financial Information
     fmt.Println("\n💰 Financial Information:")
-    fmt.Printf("   Available Balance: %s\n", formatAttoFil(info.AvailableBalance))
-    fmt.Printf("   Initial Pledge: %s\n", formatAttoFil(info.InitialPledge))
-    fmt.Printf("   Pre-Commit Deposits: %s\n", formatAttoFil(info.PreCommitDeposits))
-    fmt.Printf("   Vesting Funds: %s\n", formatAttoFil(info.VestingFunds))
-    fmt.Printf("   Total Locked: %s\n", formatAttoFil(info.TotalLocked))
+    t = table.NewWriter()
+    t.AppendHeader(table.Row{"Attribute", "Value"})
+    t.AppendRow(table.Row{"Available Balance", formatFIL(info.Miner.AvailableBalance)})
+    t.AppendRow(table.Row{"Initial Pledge", formatFIL(info.Miner.InitialPledgeRequirement)})
+    t.AppendRow(table.Row{"Vesting Funds", formatFIL(info.Miner.VestingFunds)})
+    t.AppendRow(table.Row{"Pre-Commit Deposits", formatFIL(info.Miner.PreCommitDeposits)})
+    t.AppendRow(table.Row{"Total Rewards", formatFIL(info.Miner.TotalRewards)})
+    t.AppendRow(table.Row{"Sector Pledge Balance", formatFIL(info.Miner.SectorPledgeBalance)})
+    t.AppendRow(table.Row{"Pledge Balance", formatFIL(info.Miner.PledgeBalance)})
+    fmt.Println(t.Render())
 
-    // Sector Information
+    // Sector Statistics
     fmt.Println("\n📊 Sector Statistics:")
-    fmt.Printf("   Total Sectors: %d\n", info.TotalSectors)
-    fmt.Printf("   Active Sectors: %d\n", info.ActiveSectors)
-    fmt.Printf("   Faulty Sectors: %d\n", len(info.FaultySectors))
-    fmt.Printf("   Recovering Sectors: %d\n", len(info.RecoveringSectors))
-    if len(info.LiveSectors) > 0 {
-        fmt.Printf("   Live Sectors: %d\n", len(info.LiveSectors))
-    }
-    if len(info.FaultySectors) > 0 {
-        faultRate := float64(len(info.FaultySectors)) / float64(info.TotalSectors) * 100
-        fmt.Printf("   ⚠️  Fault Rate: %.2f%%\n", faultRate)
-        fmt.Println("   Faulty Sector Numbers:")
-        for i, sector := range info.FaultySectors {
-            if i < 5 { // Show only first 5 faulty sectors to avoid cluttering
-                fmt.Printf("      - %d\n", sector)
-            } else {
-                fmt.Printf("      ... and %d more\n", len(info.FaultySectors)-5)
-                break
-            }
-        }
-    }
+    t = table.NewWriter()
+    t.AppendHeader(table.Row{"Attribute", "Value"})
+    t.AppendRow(table.Row{"Live Sectors", fmt.Sprintf("%d", info.Miner.Sectors.Live)})
+    t.AppendRow(table.Row{"Active Sectors", fmt.Sprintf("%d", info.Miner.Sectors.Active)})
+    t.AppendRow(table.Row{"Faulty Sectors", fmt.Sprintf("%d", info.Miner.Sectors.Faulty)})
+    t.AppendRow(table.Row{"Recovering Sectors", fmt.Sprintf("%d", info.Miner.Sectors.Recovering)})
+    fmt.Println(t.Render())
 
-    // Deadline Information
-    fmt.Println("\n⏰ Deadline Information:")
-    fmt.Printf("   Current Epoch: %d\n", info.CurrentEpoch)
-    fmt.Printf("   Current Deadline: %d\n", info.CurrentDeadline)
-    fmt.Printf("   Proving Period Start: %d\n", info.ProvingPeriodStart)
-    
-    // Calculate and display time-based information
-    epochDuration := 30 * time.Second // Filecoin epoch duration
-    currentTime := time.Now()
-    
-    deadlineOpen := currentTime.Add(time.Duration(info.CurrentDeadline) * epochDuration)
-    deadlineClose := deadlineOpen.Add(30 * time.Minute) // Default deadline window is 30 minutes
-    
-    fmt.Printf("   Current Time: %s\n", currentTime.Format(time.RFC3339))
-    fmt.Printf("   Deadline Window Opens: %s\n", deadlineOpen.Format(time.RFC3339))
-    fmt.Printf("   Deadline Window Closes: %s\n", deadlineClose.Format(time.RFC3339))
-    
-    timeUntilOpen := deadlineOpen.Sub(currentTime)
-    if timeUntilOpen > 0 {
-        fmt.Printf("   Time Until Window Opens: %.1f minutes\n", timeUntilOpen.Minutes())
-    }
-
-    // Performance Metrics
-    if info.MinerUptime > 0 {
-        fmt.Println("\n📈 Performance Metrics:")
-        fmt.Printf("   Miner Uptime: %.2f%%\n", info.MinerUptime*100)
-        
-        // Calculate and display additional metrics
-        successRate := float64(info.ActiveSectors) / float64(info.TotalSectors) * 100
-        fmt.Printf("   Sector Success Rate: %.2f%%\n", successRate)
-        
-        if len(info.FaultySectors) > 0 {
-            avgRecoveryTime := float64(len(info.RecoveringSectors)) / float64(len(info.FaultySectors)) * 100
-            fmt.Printf("   Recovery Progress: %.2f%%\n", avgRecoveryTime)
-        }
-    }
+    // Mining Statistics
+    fmt.Println("\n⛏️ Mining Statistics:")
+    t = table.NewWriter()
+    t.AppendHeader(table.Row{"Attribute", "Value"})
+    t.AppendRow(table.Row{"Blocks Mined", fmt.Sprintf("%d", info.Miner.BlocksMined)})
+    t.AppendRow(table.Row{"Weighted Blocks", fmt.Sprintf("%d", info.Miner.WeightedBlocksMined)})
+    fmt.Println(t.Render())
 
     fmt.Println(strings.Repeat("-", 50))
-    return nil
+}
+
+func calculatePowerShare(power, networkPower string) float64 {
+    // Convert string to big.Int
+    p := new(big.Int)
+    p.SetString(power, 10)
+
+    // Convert string to big.Int
+    np := new(big.Int)
+    np.SetString(networkPower, 10)
+
+    // Calculate power share
+    share := new(big.Float).SetInt(p)
+    share.Quo(share, new(big.Float).SetInt(np))
+
+    // Return power share as float64
+    result, _ := share.Float64()
+    return result
 }
 
 // formatBytes formats bytes into human readable format
@@ -188,7 +198,7 @@ func formatBytes(bytes string) string {
 }
 
 // formatAttoFil formats attoFIL to FIL with proper decimal places
-func formatAttoFil(attoFil string) string {
+func formatFIL(attoFil string) string {
     // Convert string to big.Int
     atto := new(big.Int)
     atto.SetString(attoFil, 10)
