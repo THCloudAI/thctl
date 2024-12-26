@@ -1,12 +1,18 @@
-.PHONY: build test clean
+.PHONY: build test clean install
 
 VERSION := $(shell git describe --tags --always --dirty)
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 
 LDFLAGS := -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 
+# 只负责编译程序
 build:
 	go build -ldflags "$(LDFLAGS)" -o bin/thctl ./cmd/thctl
+
+# 只负责安装程序到系统目录
+install:
+	sudo cp bin/thctl /usr/local/bin/thctl
+	sudo chmod 755 /usr/local/bin/thctl
 
 test:
 	go test -v ./...

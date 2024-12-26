@@ -9,7 +9,7 @@ import (
 	"github.com/THCloudAI/thctl/pkg/framework/output"
 )
 
-// VestedResult represents the vested funds query result
+// VestedResult represents the vested funds result
 type VestedResult struct {
 	MinerID string `json:"miner_id" yaml:"miner_id"`
 	Vested  string `json:"vested" yaml:"vested"`
@@ -17,7 +17,7 @@ type VestedResult struct {
 
 // TableHeaders returns the headers for table output
 func (r VestedResult) TableHeaders() []string {
-	return []string{"Miner ID", "Vested Funds"}
+	return []string{"Miner ID", "Vested"}
 }
 
 // TableRow returns the row data for table output
@@ -34,8 +34,8 @@ func newVestedCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "vested",
-		Short: "Query vested funds",
-		Long: `Query the total vested funds for a miner.
+		Short: "Get vested funds",
+		Long: `Get the total vested funds for a miner.
 
 Example:
   thctl fil sectors vested --miner f01234`,
@@ -75,7 +75,7 @@ Example:
 			// Create result
 			result := VestedResult{
 				MinerID: minerID,
-				Vested:  vested,
+				Vested:  vested.AvailableBalance,
 			}
 
 			// Get output format
