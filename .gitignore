@@ -1,20 +1,21 @@
 # Binaries and build output
-bin/
-thctl
+/bin/
+/thctl
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
 
+# Make sure we don't ignore source code
+!cmd/thctl/
+!internal/
+
 # Test binary, built with `go test -c`
 *.test
 
 # Output of the go coverage tool
 *.out
-*.log
-logs/
-log/
 
 # IDE specific files
 .idea/
