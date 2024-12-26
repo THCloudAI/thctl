@@ -7,15 +7,28 @@ package oss
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/THCloudAI/thctl/pkg/framework/template"
 )
 
-// NewOSSCmd creates a new oss command
-func NewOSSCmd() *cobra.Command {
+// NewOssCmd creates a new oss command
+func NewOssCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "oss",
 		Short: "Aliyun OSS operations",
-		Long:  `Manage Aliyun OSS storage, including bucket operations and object management.`,
+		Long: `Manage Aliyun Object Storage Service (OSS) operations.
+
+Examples:
+  # Upload a file
+  thctl oss upload --bucket my-bucket --file /path/to/file
+
+  # Download a file
+  thctl oss download --bucket my-bucket --key file-key`,
+		Run: func(cmd *cobra.Command, args []string) {
+			cmd.Help()
+		},
 	}
+
+	cmd.SetHelpTemplate(template.SubCommandHelpTemplate)
 
 	// Add subcommands
 	cmd.AddCommand(

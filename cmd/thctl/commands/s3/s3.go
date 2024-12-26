@@ -7,6 +7,7 @@ package s3
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/THCloudAI/thctl/pkg/framework/template"
 )
 
 // NewS3Cmd creates a new s3 command
@@ -14,8 +15,20 @@ func NewS3Cmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "s3",
 		Short: "AWS S3 operations",
-		Long:  `Manage AWS S3 storage, including bucket operations and object management.`,
+		Long: `Manage AWS S3 storage operations.
+
+Examples:
+  # Upload a file
+  thctl s3 upload --bucket my-bucket --file /path/to/file
+
+  # Download a file
+  thctl s3 download --bucket my-bucket --key file-key`,
+		Run: func(cmd *cobra.Command, args []string) {
+			cmd.Help()
+		},
 	}
+
+	cmd.SetHelpTemplate(template.SubCommandHelpTemplate)
 
 	// Add subcommands
 	cmd.AddCommand(

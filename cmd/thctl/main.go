@@ -17,10 +17,11 @@ import (
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/oss"
 	"github.com/THCloudAI/thctl/cmd/thctl/commands/s3"
 	"github.com/THCloudAI/thctl/pkg/framework/output"
+	"github.com/THCloudAI/thctl/pkg/version"
 )
 
 const (
-	version = "1.0.0"
+	// version = "1.0.0"
 )
 
 var (
@@ -49,13 +50,15 @@ Global Options:
   --api-key        API key for authentication
   -v, --version    Show version number
   -h, --help       Show help`,
-		PersistentPreRun: func(cmd *cobra.Command, args []string) {
-			// Handle version flag
+		Version: version.Version,
+		Run: func(cmd *cobra.Command, args []string) {
 			if showVersion {
-				fmt.Printf("thctl version %s\n", version)
+				fmt.Printf("thctl version %s\n", version.Version)
 				os.Exit(0)
 			}
-
+			cmd.Help()
+		},
+		PersistentPreRun: func(cmd *cobra.Command, args []string) {
 			// Check for API key in flag or environment
 			if apiKey == "" {
 				apiKey = os.Getenv("THC_API_KEY")
@@ -97,9 +100,9 @@ func init() {
 	rootCmd.AddCommand(
 		auth.NewAuthCmd(),
 		fil.NewFilCmd(),
+		cos.NewCosCmd(),
+		oss.NewOssCmd(),
 		s3.NewS3Cmd(),
-		oss.NewOSSCmd(),
-		cos.NewCOSCmd(),
 	)
 }
 
