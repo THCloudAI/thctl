@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"github.com/spf13/cobra"
-	"github.com/thcloudai/thctl/internal/lotus"
-	"github.com/thcloudai/thctl/pkg/framework/output"
+	"github.com/THCloudAI/thctl/internal/lotus"
+	"github.com/THCloudAI/thctl/pkg/framework/output"
 )
 
 // NewDeadlineCmd creates a new deadline command

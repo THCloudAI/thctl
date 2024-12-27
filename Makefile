@@ -1,9 +1,9 @@
 .PHONY: build test clean install
 
-VERSION := $(shell git describe --tags --always --dirty)
+VERSION := 1.3.0
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 
-LDFLAGS := -X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
+LDFLAGS := -X github.com/THCloudAI/thctl/pkg/version.Version=$(VERSION) -X main.buildTime=$(BUILD_TIME)
 
 # 只负责编译程序
 build:

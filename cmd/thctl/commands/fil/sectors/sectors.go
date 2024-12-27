@@ -9,7 +9,7 @@ func NewSectorsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sectors",
 		Short: "Manage Filecoin sectors",
-		Long: `Manage Filecoin sectors including listing, status check, and information retrieval.
+		Long: `Manage Filecoin sectors for a miner.
 
 Examples:
   # List all sectors
@@ -30,11 +30,11 @@ Examples:
 
 	// Add subcommands
 	cmd.AddCommand(
-		newListCmd(),
-		newStatusCmd(),
-		newInfoCmd(),
-		newPenaltyCmd(),
-		newVestedCmd(),
+		NewListCmd(),
+		NewInfoCmd(),
+		NewStatusCmd(),
+		NewPenaltyCmd(),
+		NewVestedCmd(),
 	)
 
 	return cmd

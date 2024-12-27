@@ -1,718 +1,648 @@
 package lotus
 
 import (
-    "bytes"
-    "context"
-    "encoding/json"
-    "errors"
-    "fmt"
-    "math/big"
-    "net/http"
-    "os"
-    "strings"
-    "time"
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
+	"time"
 
-    ma "github.com/multiformats/go-multiaddr"
-    "golang.org/x/sync/errgroup"
+	"github.com/THCloudAI/thctl/internal/config"
+	"github.com/multiformats/go-multiaddr"
 )
 
 // Config represents the configuration for a Lotus client
 type Config struct {
-    APIURL     string        `mapstructure:"api_url"`
-    AuthToken  string        `mapstructure:"token"`
-    Timeout    time.Duration `mapstructure:"timeout"`
-    RetryCount int           `mapstructure:"retry_count"`
+	APIURL     string        `mapstructure:"api_url"`
+	AuthToken  string        `mapstructure:"token"`
+	Timeout    time.Duration `mapstructure:"timeout"`
+	RetryCount int          `mapstructure:"retry_count"`
 }
 
 var defaultTimeout = 30 * time.Second
 
 // New creates a new Lotus client
 func New(cfg Config) *Client {
-    if cfg.APIURL == "" {
-        cfg.APIURL = "http://127.0.0.1:1234/rpc/v0"
-    }
-    if cfg.Timeout == 0 {
-        cfg.Timeout = defaultTimeout
-    }
+	if cfg.Timeout == 0 {
+		cfg.Timeout = defaultTimeout
+	}
+	if cfg.RetryCount == 0 {
+		cfg.RetryCount = 3
+	}
 
-    return &Client{
-        apiURL: cfg.APIURL,
-        token:  cfg.AuthToken,
-        httpClient: &http.Client{
-            Timeout: cfg.Timeout,
-        },
-    }
+	// Convert multiaddr to HTTP URL if needed
+	apiURL := cfg.APIURL
+	if strings.HasPrefix(apiURL, "/ip4/") || strings.HasPrefix(apiURL, "/ip6/") {
+		maddr, err := multiaddr.NewMultiaddr(apiURL)
+		if err != nil {
+			apiURL = fmt.Sprintf("http://%s", strings.TrimPrefix(apiURL, "/ip4/"))
+		} else {
+			// Extract host and port from multiaddr
+			host, err := maddr.ValueForProtocol(multiaddr.P_IP4)
+			if err != nil {
+				host, _ = maddr.ValueForProtocol(multiaddr.P_IP6)
+			}
+			port, _ := maddr.ValueForProtocol(multiaddr.P_TCP)
+			apiURL = fmt.Sprintf("http://%s:%s/rpc/v0", host, port)
+		}
+	}
+
+	httpClient := &http.Client{
+		Timeout: cfg.Timeout,
+	}
+
+	return &Client{
+		apiURL:     apiURL,
+		token:      cfg.AuthToken,
+		httpClient: httpClient,
+	}
 }
 
 // NewFromEnv creates a new Lotus client from environment variables
-func NewFromEnv() *Client {
-    config := &Config{}
-    if url := os.Getenv("LOTUS_API_URL"); url != "" {
-        config.APIURL = url
-    }
-    if token := os.Getenv("LOTUS_API_TOKEN"); token != "" {
-        config.AuthToken = token
-    }
+func NewFromEnv() (*Client, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %v", err)
+	}
 
-    return New(*config)
+	if cfg.Lotus.APIURL == "" {
+		return nil, fmt.Errorf("LOTUS_API_URL environment variable is not set")
+	}
+
+	return New(Config{
+		APIURL:    cfg.Lotus.APIURL,
+		AuthToken: cfg.Lotus.AuthToken,
+		Timeout:   cfg.Lotus.Timeout,
+	}), nil
 }
 
 // Client represents a Lotus API client
 type Client struct {
-    apiURL     string
-    token      string
-    httpClient *http.Client
-}
-
-// callRPC makes a JSON-RPC call to the Lotus API
-func (c *Client) callRPC(ctx context.Context, method string, params interface{}, result interface{}) error {
-    // Convert multiaddr URL to HTTP URL if necessary
-    apiURL := c.apiURL
-    if strings.HasPrefix(apiURL, "/ip4/") || strings.HasPrefix(apiURL, "/ip6/") {
-        maddr, err := ma.NewMultiaddr(apiURL)
-        if err != nil {
-            return fmt.Errorf("failed to parse multiaddr: %v", err)
-        }
-
-        // Extract IP and port from multiaddr
-        ip, err := maddr.ValueForProtocol(ma.P_IP4)
-        if err != nil {
-            ip, err = maddr.ValueForProtocol(ma.P_IP6)
-            if err != nil {
-                return fmt.Errorf("failed to get IP from multiaddr: %v", err)
-            }
-        }
-        port, err := maddr.ValueForProtocol(ma.P_TCP)
-        if err != nil {
-            return fmt.Errorf("failed to get port from multiaddr: %v", err)
-        }
-
-        // Construct HTTP URL
-        apiURL = fmt.Sprintf("http://%s:%s/rpc/v0", ip, port)
-    }
-
-    // Prepare request body
-    reqBody := map[string]interface{}{
-        "jsonrpc": "2.0",
-        "method":  method,
-        "params":  params,
-        "id":     1,
-    }
-    reqBytes, err := json.Marshal(reqBody)
-    if err != nil {
-        return fmt.Errorf("failed to marshal request: %v", err)
-    }
-
-    // Create request
-    req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewReader(reqBytes))
-    if err != nil {
-        return fmt.Errorf("failed to create request: %v", err)
-    }
-
-    // Set headers
-    req.Header.Set("Content-Type", "application/json")
-    if c.token != "" {
-        req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
-    }
-
-    // Make request
-    resp, err := c.httpClient.Do(req)
-    if err != nil {
-        return fmt.Errorf("failed to make request: %v", err)
-    }
-    defer resp.Body.Close()
-
-    // Parse response
-    var rpcResp struct {
-        JSONRPC string          `json:"jsonrpc"`
-        Result  json.RawMessage `json:"result"`
-        Error   *struct {
-            Code    int    `json:"code"`
-            Message string `json:"message"`
-        } `json:"error,omitempty"`
-        ID int `json:"id"`
-    }
-    if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-        return fmt.Errorf("failed to decode response: %v", err)
-    }
-
-    // Check for RPC error
-    if rpcResp.Error != nil {
-        return fmt.Errorf("RPC error: %s (code: %d)", rpcResp.Error.Message, rpcResp.Error.Code)
-    }
-
-    // Unmarshal result
-    if err := json.Unmarshal(rpcResp.Result, result); err != nil {
-        return fmt.Errorf("failed to unmarshal result: %v", err)
-    }
-
-    return nil
+	apiURL     string
+	token      string
+	httpClient *http.Client
 }
 
 // callRPCWithRetry makes a JSON-RPC call to the Lotus API with retry
 func (c *Client) callRPCWithRetry(ctx context.Context, method string, params interface{}, result interface{}) error {
-    var err error
-    for i := 0; i < 3; i++ {
-        err = c.callRPC(ctx, method, params, result)
-        if err == nil {
-            break
-        }
-    }
-    return err
+	if c.apiURL == "" {
+		return fmt.Errorf("LOTUS_API_URL is not set")
+	}
+
+	requestBody, err := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+		"id":      1,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var rpcResponse struct {
+		Error  *struct{ Message string } `json:"error,omitempty"`
+		Result json.RawMessage         `json:"result,omitempty"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&rpcResponse); err != nil {
+		return fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if rpcResponse.Error != nil {
+		return fmt.Errorf("RPC error: %s", rpcResponse.Error.Message)
+	}
+
+	if err := json.Unmarshal(rpcResponse.Result, result); err != nil {
+		return fmt.Errorf("failed to unmarshal result: %w", err)
+	}
+
+	return nil
 }
 
-// ListSectors lists all sectors for a miner
-func (c *Client) ListSectors(ctx context.Context, minerID string) ([]map[string]interface{}, error) {
-    var result []map[string]interface{}
-    params := []interface{}{minerID, nil, false} // Use null for tipset key and false for show uncommitted
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerSectors", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetSectorInfo gets information about a specific sector
-func (c *Client) GetSectorInfo(ctx context.Context, minerID string, sectorNumber int64) (map[string]interface{}, error) {
-    var result map[string]interface{}
-    params := []interface{}{minerID, sectorNumber}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateSectorGetInfo", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetSectorPenalty gets penalty information for a specific sector
-func (c *Client) GetSectorPenalty(ctx context.Context, minerID string, sectorNumber int64) (map[string]interface{}, error) {
-    var result map[string]interface{}
-    params := []interface{}{minerID, sectorNumber}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateSectorPenalty", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetSectorVested gets vesting information for a specific sector
-func (c *Client) GetSectorVested(ctx context.Context, minerID string, sectorNumber int64) (map[string]interface{}, error) {
-    var result map[string]interface{}
-    params := []interface{}{minerID, sectorNumber}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateSectorVested", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetMinerInfo gets basic information about a miner
-func (c *Client) GetMinerInfo(ctx context.Context, minerID string) (map[string]interface{}, error) {
-    if minerID == "" {
-        return nil, errors.New("miner ID cannot be empty")
-    }
-
-    var result map[string]interface{}
-    err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerInfo", []interface{}{minerID, nil}, &result)
-    if err != nil {
-        return nil, fmt.Errorf("failed to get miner info: %w", err)
-    }
-    return result, nil
-}
-
-// GetMinerPower gets power information about a miner
-func (c *Client) GetMinerPower(ctx context.Context, minerID string) (map[string]interface{}, error) {
-    var result map[string]interface{}
-    params := []interface{}{minerID, nil} // Use null for tipset key
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerPower", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetMinerAvailableBalance gets the available balance of a miner
-func (c *Client) GetMinerAvailableBalance(ctx context.Context, minerID string) (string, error) {
-    var result string
-    params := []interface{}{minerID, nil}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerAvailableBalance", params, &result); err != nil {
-        return "", err
-    }
-
-    return result, nil
-}
-
-// GetMinerFaults gets the faulty sectors of a miner
-func (c *Client) GetMinerFaults(ctx context.Context, minerID string) ([]uint64, error) {
-    var result []uint64
-    params := []interface{}{minerID, nil}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerFaults", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetMinerDeadlines gets the deadlines information of a miner
-func (c *Client) GetMinerDeadlines(ctx context.Context, minerID string) (map[string]interface{}, error) {
-    var result map[string]interface{}
-    params := []interface{}{minerID, nil}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerDeadlines", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetMinerPartitions gets the partitions information of a miner
-func (c *Client) GetMinerPartitions(ctx context.Context, minerID string, dlIdx uint64) ([]map[string]interface{}, error) {
-    var result []map[string]interface{}
-    params := []interface{}{minerID, dlIdx, nil}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerPartitions", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetMinerProvingDeadline gets the current proving deadline of a miner
-func (c *Client) GetMinerProvingDeadline(ctx context.Context, minerID string) (map[string]interface{}, error) {
-    var result map[string]interface{}
-    params := []interface{}{minerID, nil}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerProvingDeadline", params, &result); err != nil {
-        return nil, err
-    }
-
-    return result, nil
-}
-
-// GetMinerPreCommitDeposit gets the pre-commit deposit required for a sector
-func (c *Client) GetMinerPreCommitDeposit(ctx context.Context, minerID string, sectorNumber uint64) (string, error) {
-    var result string
-    params := []interface{}{minerID, sectorNumber, nil}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerPreCommitDeposit", params, &result); err != nil {
-        return "", err
-    }
-
-    return result, nil
-}
-
-// GetMinerInitialPledgeCollateral gets the initial pledge collateral required for a sector
-func (c *Client) GetMinerInitialPledgeCollateral(ctx context.Context, minerID string, sectorNumber uint64) (string, error) {
-    var result string
-    params := []interface{}{minerID, sectorNumber, nil}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerInitialPledgeCollateral", params, &result); err != nil {
-        return "", err
-    }
-
-    return result, nil
-}
-
-// GetMinerSectorAllocated checks if a sector number is allocated
-func (c *Client) GetMinerSectorAllocated(ctx context.Context, minerID string, sectorNumber uint64) (bool, error) {
-    var result bool
-    params := []interface{}{minerID, sectorNumber, nil}
-    
-    if err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerSectorAllocated", params, &result); err != nil {
-        return false, err
-    }
-
-    return result, nil
-}
-
-// GetMinerWorkerAddress gets the worker address of a miner
-func (c *Client) GetMinerWorkerAddress(ctx context.Context, minerID string) (string, error) {
-    minerInfo, err := c.GetMinerInfo(ctx, minerID)
-    if err != nil {
-        return "", err
-    }
-
-    worker, ok := minerInfo["Worker"].(string)
-    if !ok {
-        return "", fmt.Errorf("worker address not found in miner info")
-    }
-
-    return worker, nil
-}
-
-// GetMinerOwnerAddress gets the owner address of a miner
-func (c *Client) GetMinerOwnerAddress(ctx context.Context, minerID string) (string, error) {
-    minerInfo, err := c.GetMinerInfo(ctx, minerID)
-    if err != nil {
-        return "", err
-    }
-
-    owner, ok := minerInfo["Owner"].(string)
-    if !ok {
-        return "", fmt.Errorf("owner address not found in miner info")
-    }
-
-    return owner, nil
-}
-
-// GetMinerBeneficiaryAddress gets the beneficiary address of a miner
-func (c *Client) GetMinerBeneficiaryAddress(ctx context.Context, minerID string) (string, error) {
-    minerInfo, err := c.GetMinerInfo(ctx, minerID)
-    if err != nil {
-        return "", err
-    }
-
-    beneficiary, ok := minerInfo["Beneficiary"].(string)
-    if !ok {
-        return "", fmt.Errorf("beneficiary address not found in miner info")
-    }
-
-    return beneficiary, nil
-}
-
-// MinerInfo represents comprehensive information about a miner
-type MinerInfo struct {
-    // Basic Information
-    BasicInfo         map[string]interface{} `json:"basic_info"`
-    SectorSize       uint64                 `json:"sector_size"`
-    WindowPoStProofType uint64              `json:"window_post_proof_type"`
-    
-    // Addresses
-    WorkerAddress    string                 `json:"worker_address"`
-    OwnerAddress     string                 `json:"owner_address"`
-    Beneficiary      string                 `json:"beneficiary"`
-    ControlAddresses []string               `json:"control_addresses"`
-    
-    // Power Information
-    Power            map[string]interface{} `json:"power"`
-    RawBytePower     string                 `json:"raw_byte_power"`
-    QualityAdjPower  string                 `json:"quality_adj_power"`
-    NetworkPowerShare float64               `json:"network_power_share"`
-    
-    // Financial Information
-    AvailableBalance string                 `json:"available_balance"`
-    InitialPledge    string                 `json:"initial_pledge"`
-    PreCommitDeposits string                `json:"pre_commit_deposits"`
-    VestingFunds     string                 `json:"vesting_funds"`
-    TotalLocked      string                 `json:"total_locked"`
-    
-    // Sector Information
-    TotalSectors     uint64                 `json:"total_sectors"`
-    ActiveSectors    uint64                 `json:"active_sectors"`
-    FaultySectors    []uint64               `json:"faulty_sectors"`
-    RecoveringSectors []uint64              `json:"recovering_sectors"`
-    LiveSectors      []uint64               `json:"live_sectors"`
-    
-    // Deadline Information
-    CurrentDeadline  uint64                 `json:"current_deadline"`
-    CurrentEpoch     uint64                 `json:"current_epoch"`
-    ProvingPeriodStart uint64              `json:"proving_period_start"`
-    Deadlines        map[string]interface{} `json:"deadlines"`
-    ProvingDeadline  map[string]interface{} `json:"proving_deadline"`
-    
-    // Performance Metrics
-    QualityAdjPowerPerSector string         `json:"quality_adj_power_per_sector"`
-    ConsensusMiners         uint64          `json:"consensus_miners"`
-    MinerUptime            float64         `json:"miner_uptime"`
-}
-
-// GetComprehensiveMinerInfo gets all available information about a miner
+// GetComprehensiveMinerInfo retrieves comprehensive information about a miner
 func (c *Client) GetComprehensiveMinerInfo(ctx context.Context, minerID string) (*MinerInfo, error) {
-    if minerID == "" {
-        return nil, errors.New("miner ID cannot be empty")
-    }
+	info := &MinerInfo{
+		ID:                 minerID,
+		Address:           minerID,
+		Actor:             "storageminer",
+		OwnedMiners:       make([]string, 0),
+		WorkerMiners:      make([]string, 0),
+		BenefitedMiners:   make([]string, 0),
+		CreateTimestamp:   time.Now().Unix(),
+		LastSeenTimestamp: time.Now().Unix(),
+	}
 
-    var info MinerInfo
-    g, ctx := errgroup.WithContext(ctx)
+	// Initialize nested structs
+	info.Miner.Owner = struct {
+		Address string `json:"address"`
+		Balance string `json:"balance"`
+		ID      string `json:"id,omitempty"`
+	}{}
+	info.Miner.Worker = struct {
+		Address string `json:"address"`
+		Balance string `json:"balance"`
+		ID      string `json:"id,omitempty"`
+	}{}
+	info.Miner.Beneficiary = struct {
+		Address string `json:"address"`
+		Balance string `json:"balance"`
+		ID      string `json:"id,omitempty"`
+	}{}
+	info.Miner.ControlAddresses = make([]ControlAddress, 0)
+	info.Miner.MultiAddresses = make([]string, 0)
+	info.Miner.Sectors = struct {
+		Live       uint64 `json:"live"`
+		Active     uint64 `json:"active"`
+		Faulty     uint64 `json:"faulty"`
+		Recovering uint64 `json:"recovering"`
+	}{}
 
-    // Get basic miner info
-    g.Go(func() error {
-        basicInfo, err := c.GetMinerInfo(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get basic info: %w", err)
-        }
-        info.BasicInfo = basicInfo
-        
-        // Extract specific fields from basic info
-        if sectorSize, ok := basicInfo["SectorSize"].(uint64); ok {
-            info.SectorSize = sectorSize
-        }
-        if proofType, ok := basicInfo["WindowPoStProofType"].(uint64); ok {
-            info.WindowPoStProofType = proofType
-        }
-        if controlAddrs, ok := basicInfo["ControlAddresses"].([]string); ok {
-            info.ControlAddresses = controlAddrs
-        }
-        return nil
-    })
+	// Initialize default values for strings
+	info.Miner.TotalRewards = "0"
+	info.Miner.PreCommitDeposits = "0"
+	info.Miner.VestingFunds = "0"
+	info.Miner.InitialPledgeRequirement = "0"
+	info.Miner.AvailableBalance = "0"
+	info.Miner.SectorPledgeBalance = "0"
+	info.Miner.PledgeBalance = "0"
+	info.Balance = "0"
 
-    // Get power information
-    g.Go(func() error {
-        power, err := c.GetMinerPower(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get power info: %w", err)
-        }
-        info.Power = power
-        
-        // Extract and calculate power metrics
-        if minerPower, ok := power["MinerPower"].(map[string]interface{}); ok {
-            info.RawBytePower = minerPower["RawBytePower"].(string)
-            info.QualityAdjPower = minerPower["QualityAdjPower"].(string)
-            
-            // Calculate network power share
-            if totalPower, ok := power["TotalPower"].(map[string]interface{}); ok {
-                if totalRaw, ok := totalPower["RawBytePower"].(string); ok {
-                    info.NetworkPowerShare = calculatePowerShare(info.RawBytePower, totalRaw)
-                }
-            }
-        }
-        return nil
-    })
+	// Prepare batch RPC calls
+	var (
+		minerInfo  interface{}
+		minerPower interface{}
+		state      interface{}
+		faults     interface{}
+		recoveries interface{}
+		active     interface{}
+	)
 
-    // Get financial information
-    g.Go(func() error {
-        balance, err := c.GetMinerAvailableBalance(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get available balance: %w", err)
-        }
-        info.AvailableBalance = balance
+	// First batch: Get basic miner info and state
+	requests := []map[string]interface{}{
+		{
+			"jsonrpc": "2.0",
+			"method":  "Filecoin.StateMinerInfo",
+			"params":  []interface{}{minerID, nil},
+			"id":      1,
+		},
+		{
+			"jsonrpc": "2.0",
+			"method":  "Filecoin.StateMinerPower",
+			"params":  []interface{}{minerID, nil},
+			"id":      2,
+		},
+		{
+			"jsonrpc": "2.0",
+			"method":  "Filecoin.StateReadState",
+			"params":  []interface{}{minerID, nil},
+			"id":      3,
+		},
+		{
+			"jsonrpc": "2.0",
+			"method":  "Filecoin.StateLookupRobustAddress",
+			"params":  []interface{}{minerID, nil},
+			"id":      4,
+		},
+		{
+			"jsonrpc": "2.0",
+			"method":  "Filecoin.StateMinerFaults",
+			"params":  []interface{}{minerID, nil},
+			"id":      5,
+		},
+		{
+			"jsonrpc": "2.0",
+			"method":  "Filecoin.StateMinerRecoveries",
+			"params":  []interface{}{minerID, nil},
+			"id":      6,
+		},
+		{
+			"jsonrpc": "2.0",
+			"method":  "Filecoin.StateMinerActiveSectors",
+			"params":  []interface{}{minerID, nil},
+			"id":      7,
+		},
+	}
 
-        // Get initial pledge
-        var initialPledge interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerInitialPledgeCollateral", []interface{}{minerID, nil}, &initialPledge)
-        if err != nil {
-            return fmt.Errorf("failed to get initial pledge: %w", err)
-        }
-        if pledge, ok := initialPledge.(string); ok {
-            info.InitialPledge = pledge
-        }
+	// Execute first batch request
+	responses, err := c.BatchCallWithRetry(ctx, requests)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute first batch request: %w", err)
+	}
 
-        // Get pre-commit deposits
-        var preCommitDeposits interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerPreCommitDeposit", []interface{}{minerID, nil}, &preCommitDeposits)
-        if err != nil {
-            return fmt.Errorf("failed to get pre-commit deposits: %w", err)
-        }
-        if deposits, ok := preCommitDeposits.(string); ok {
-            info.PreCommitDeposits = deposits
-        }
+	// Check for individual call errors and process responses
+	for _, resp := range responses {
+		if resp["error"] != nil {
+			fmt.Printf("Error in RPC call: %v\n", resp["error"])
+			continue
+		}
 
-        // Get vesting funds
-        var vestingFunds interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerVestingFunds", []interface{}{minerID, nil}, &vestingFunds)
-        if err != nil {
-            return fmt.Errorf("failed to get vesting funds: %w", err)
-        }
-        if vesting, ok := vestingFunds.(string); ok {
-            info.VestingFunds = vesting
-        }
+		result, ok := resp["result"]
+		if !ok {
+			continue
+		}
 
-        return nil
-    })
+		id, ok := resp["id"].(float64)
+		if !ok {
+			continue
+		}
 
-    // Get sector information
-    g.Go(func() error {
-        // Get faulty sectors
-        faults, err := c.GetMinerFaults(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get faults: %w", err)
-        }
-        info.FaultySectors = faults
+		switch id {
+		case 1:
+			minerInfo = result
+		case 2:
+			minerPower = result
+		case 3:
+			state = result
+		case 4:
+			// Process robust address
+			if result != nil {
+				robustBytes, _ := json.MarshalIndent(result, "", "  ")
+				fmt.Printf("Debug - StateLookupRobustAddress response:\n%s\n", string(robustBytes))
+				if robustAddr, ok := result.(string); ok {
+					info.Robust = robustAddr
+				}
+			} else {
+				fmt.Printf("Debug - StateLookupRobustAddress returned nil\n")
+			}
+		case 5:
+			faults = result
+		case 6:
+			recoveries = result
+		case 7:
+			active = result
+		}
+	}
 
-        // Get recovering sectors
-        var recoveringSectors interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerRecoveringSectors", []interface{}{minerID, nil}, &recoveringSectors)
-        if err != nil {
-            return fmt.Errorf("failed to get recovering sectors: %w", err)
-        }
-        if recovering, ok := recoveringSectors.([]uint64); ok {
-            info.RecoveringSectors = recovering
-        }
+	// Process results
+	if err := c.processBasicInfo(ctx, info, minerInfo); err != nil {
+		return nil, fmt.Errorf("failed to process basic info: %v", err)
+	}
 
-        // Get live sectors
-        var liveSectors interface{}
-        err = c.callRPCWithRetry(ctx, "Filecoin.StateMinerActiveSectors", []interface{}{minerID, nil}, &liveSectors)
-        if err != nil {
-            return fmt.Errorf("failed to get live sectors: %w", err)
-        }
-        if live, ok := liveSectors.([]uint64); ok {
-            info.LiveSectors = live
-            info.TotalSectors = uint64(len(live))
-            info.ActiveSectors = info.TotalSectors - uint64(len(info.FaultySectors))
-        }
+	c.processPowerInfo(info, minerPower)
+	c.processStateInfo(info, state)
+	c.processFaults(info, faults)
+	c.processRecoveries(info, recoveries)
+	c.processActiveSectors(info, active)
 
-        return nil
-    })
-
-    // Get deadline information
-    g.Go(func() error {
-        deadlines, err := c.GetMinerDeadlines(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get deadlines: %w", err)
-        }
-        info.Deadlines = deadlines
-
-        provingDeadline, err := c.GetMinerProvingDeadline(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get proving deadline: %w", err)
-        }
-        info.ProvingDeadline = provingDeadline
-
-        if epoch, ok := provingDeadline["CurrentEpoch"].(uint64); ok {
-            info.CurrentEpoch = epoch
-        }
-        if deadline, ok := provingDeadline["DeadlineIndex"].(uint64); ok {
-            info.CurrentDeadline = deadline
-        }
-        if start, ok := provingDeadline["PeriodStart"].(uint64); ok {
-            info.ProvingPeriodStart = start
-        }
-
-        return nil
-    })
-
-    // Get addresses
-    g.Go(func() error {
-        worker, err := c.GetMinerWorkerAddress(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get worker address: %w", err)
-        }
-        info.WorkerAddress = worker
-
-        owner, err := c.GetMinerOwnerAddress(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get owner address: %w", err)
-        }
-        info.OwnerAddress = owner
-
-        beneficiary, err := c.GetMinerBeneficiaryAddress(ctx, minerID)
-        if err != nil {
-            return fmt.Errorf("failed to get beneficiary address: %w", err)
-        }
-        info.Beneficiary = beneficiary
-
-        return nil
-    })
-
-    if err := g.Wait(); err != nil {
-        return &info, fmt.Errorf("failed to get comprehensive miner info: %w", err)
-    }
-
-    return &info, nil
+	return info, nil
 }
 
-// calculatePowerShare calculates the percentage of network power
-func calculatePowerShare(minerPower, totalPower string) float64 {
-    if minerPower == "" || totalPower == "" {
-        return 0.0
-    }
+// Process basic miner info
+func (c *Client) processBasicInfo(ctx context.Context, info *MinerInfo, minerInfo interface{}) error {
+	if minerInfo == nil {
+		return fmt.Errorf("miner info is nil")
+	}
 
-    // Convert power strings to big integers
-    minerBytes, ok := new(big.Int).SetString(minerPower, 10)
-    if !ok {
-        return 0.0
-    }
+	basicInfo, ok := minerInfo.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid miner info format")
+	}
 
-    totalBytes, ok := new(big.Int).SetString(totalPower, 10)
-    if !ok {
-        return 0.0
-    }
+	// Extract owner address
+	if owner, ok := basicInfo["Owner"].(string); ok {
+		info.Miner.Owner.Address = owner
+	}
 
-    if totalBytes.Sign() == 0 {
-        return 0.0
-    }
+	// Extract worker address
+	if worker, ok := basicInfo["Worker"].(string); ok {
+		info.Miner.Worker.Address = worker
+	}
 
-    // Calculate percentage: (minerBytes * 100) / totalBytes
-    percentage := new(big.Float).SetInt(minerBytes)
-    percentage.Mul(percentage, big.NewFloat(100))
-    percentage.Quo(percentage, new(big.Float).SetInt(totalBytes))
+	// Extract beneficiary address
+	if beneficiary, ok := basicInfo["Beneficiary"].(string); ok {
+		info.Miner.Beneficiary.Address = beneficiary
+	}
 
-    result, _ := percentage.Float64()
-    return result
+	// Extract control addresses
+	if control, ok := basicInfo["ControlAddresses"].([]interface{}); ok {
+		for _, addr := range control {
+			if strAddr, ok := addr.(string); ok {
+				info.Miner.ControlAddresses = append(info.Miner.ControlAddresses, ControlAddress{Address: strAddr})
+			}
+		}
+	}
+
+	// Extract peer ID
+	if peerID, ok := basicInfo["PeerId"].(string); ok {
+		info.Miner.PeerID = peerID
+	}
+
+	// Extract multiaddresses
+	if multiaddrs, ok := basicInfo["Multiaddrs"].([]interface{}); ok {
+		for _, addr := range multiaddrs {
+			if bytes, ok := addr.([]byte); ok {
+				maddr, err := multiaddr.NewMultiaddrBytes(bytes)
+				if err == nil {
+					info.Miner.MultiAddresses = append(info.Miner.MultiAddresses, maddr.String())
+				}
+			}
+		}
+	}
+
+	// Extract sector size
+	if sectorSize, ok := basicInfo["SectorSize"].(float64); ok {
+		info.Miner.SectorSize = uint64(sectorSize)
+	}
+
+	return nil
 }
 
-// formatBytes formats bytes to human readable string (KiB, MiB, GiB, TiB, PiB, EiB)
-func formatBytes(bytes string) string {
-    if bytes == "" {
-        return "0 B"
-    }
+// Process power info
+func (c *Client) processPowerInfo(info *MinerInfo, powerInfo interface{}) {
+	if powerInfo == nil {
+		return
+	}
 
-    b, ok := new(big.Int).SetString(bytes, 10)
-    if !ok {
-        return "0 B"
-    }
+	power, ok := powerInfo.(map[string]interface{})
+	if !ok {
+		return
+	}
 
-    units := []string{"B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
-    base := big.NewFloat(1024)
-    size := new(big.Float).SetInt(b)
+	if minerPower, ok := power["MinerPower"].(map[string]interface{}); ok {
+		if raw, ok := minerPower["RawBytePower"].(string); ok {
+			info.Miner.RawBytePower = raw
+		}
+		if quality, ok := minerPower["QualityAdjPower"].(string); ok {
+			info.Miner.QualityAdjPower = quality
+		}
+	}
 
-    var i int
-    for i = 0; i < len(units)-1; i++ {
-        next := new(big.Float).Quo(size, base)
-        if next.Cmp(big.NewFloat(1)) < 0 {
-            break
-        }
-        size = next
-    }
-
-    value, _ := size.Float64()
-    return fmt.Sprintf("%.2f %s", value, units[i])
+	if totalPower, ok := power["TotalPower"].(map[string]interface{}); ok {
+		if raw, ok := totalPower["RawBytePower"].(string); ok {
+			info.Miner.NetworkRawBytePower = raw
+		}
+		if quality, ok := totalPower["QualityAdjPower"].(string); ok {
+			info.Miner.NetworkQualityAdjPower = quality
+		}
+	}
 }
 
-// formatAttoFil formats attoFIL to FIL with proper decimal places
-func formatAttoFil(attoFil string) string {
-    if attoFil == "" {
-        return "0 FIL"
-    }
+// Process chain head info
+func (c *Client) processChainHead(info *MinerInfo, headInfo interface{}) {
+	if headInfo == nil {
+		return
+	}
 
-    atto, ok := new(big.Int).SetString(attoFil, 10)
-    if !ok {
-        return "0 FIL"
-    }
+	head, ok := headInfo.(map[string]interface{})
+	if !ok {
+		return
+	}
 
-    // 1 FIL = 10^18 attoFIL
-    fil := new(big.Float).SetInt(atto)
-    fil.Quo(fil, big.NewFloat(1e18))
+	if height, ok := head["Height"].(float64); ok {
+		info.LastSeenHeight = uint64(height)
+		info.CreateHeight = uint64(height) // 临时设置，实际应该从其他API获取
+	}
 
-    value, _ := fil.Float64()
-    return fmt.Sprintf("%.6f FIL", value)
+	if blocks, ok := head["Blocks"].([]interface{}); ok && len(blocks) > 0 {
+		if block, ok := blocks[0].(map[string]interface{}); ok {
+			if timestamp, ok := block["Timestamp"].(float64); ok {
+				info.LastSeenTimestamp = int64(timestamp)
+				info.CreateTimestamp = int64(timestamp) // 临时设置，实际应该从其他API获取
+			}
+		}
+	}
 }
 
-// GetMinerStats returns formatted statistics about a miner
-func (c *Client) GetMinerStats(ctx context.Context, minerID string) (map[string]string, error) {
-    stats := make(map[string]string)
+// Process actor info
+func (c *Client) processActorInfo(info *MinerInfo, actorInfo interface{}) {
+	if actorInfo == nil {
+		return
+	}
 
-    info, err := c.GetComprehensiveMinerInfo(ctx, minerID)
-    if err != nil {
-        return nil, fmt.Errorf("failed to get miner info: %v", err)
-    }
+	actor, ok := actorInfo.(map[string]interface{})
+	if !ok {
+		return
+	}
 
-    // Format and add statistics
-    stats["Raw Power"] = formatBytes(info.RawBytePower)
-    stats["Quality-Adjusted Power"] = formatBytes(info.QualityAdjPower)
-    stats["Network Power Share"] = fmt.Sprintf("%.4f%%", info.NetworkPowerShare*100)
-    stats["Available Balance"] = formatAttoFil(info.AvailableBalance)
-    stats["Initial Pledge"] = formatAttoFil(info.InitialPledge)
-    stats["Pre-Commit Deposits"] = formatAttoFil(info.PreCommitDeposits)
-    stats["Vesting Funds"] = formatAttoFil(info.VestingFunds)
-    stats["Total Locked"] = formatAttoFil(info.TotalLocked)
-    stats["Total Sectors"] = fmt.Sprintf("%d", info.TotalSectors)
-    stats["Active Sectors"] = fmt.Sprintf("%d", info.ActiveSectors)
-    stats["Faulty Sectors"] = fmt.Sprintf("%d", len(info.FaultySectors))
-    stats["Recovering Sectors"] = fmt.Sprintf("%d", len(info.RecoveringSectors))
-    stats["Live Sectors"] = fmt.Sprintf("%d", len(info.LiveSectors))
-    stats["Current Deadline"] = fmt.Sprintf("%d", info.CurrentDeadline)
-    stats["Current Epoch"] = fmt.Sprintf("%d", info.CurrentEpoch)
-    stats["Proving Period Start"] = fmt.Sprintf("%d", info.ProvingPeriodStart)
-    stats["Quality-Adjusted Power/Sector"] = formatBytes(info.QualityAdjPowerPerSector)
-    stats["Consensus Miners"] = fmt.Sprintf("%d", info.ConsensusMiners)
-    stats["Miner Uptime"] = fmt.Sprintf("%.2f%%", info.MinerUptime*100)
+	if balance, ok := actor["Balance"].(string); ok {
+		info.Balance = balance
+	}
+}
 
-    return stats, nil
+// Process state info from StateReadState
+func (c *Client) processStateInfo(info *MinerInfo, stateInfo interface{}) {
+	if stateInfo == nil {
+		return
+	}
+
+	state, ok := stateInfo.(map[string]interface{})
+	if !ok {
+		return
+	}
+
+	// Process balance
+	if balance, ok := state["Balance"].(string); ok {
+		info.Balance = balance
+	}
+
+	if stateObj, ok := state["State"].(map[string]interface{}); ok {
+		// Process balances
+		if lockedFunds, ok := stateObj["LockedFunds"].(string); ok {
+			info.Miner.AvailableBalance = lockedFunds
+		}
+		if pledge, ok := stateObj["InitialPledge"].(string); ok {
+			info.Miner.InitialPledgeRequirement = pledge
+			info.Miner.SectorPledgeBalance = pledge
+			info.Miner.PledgeBalance = pledge
+		}
+		if deposits, ok := stateObj["PreCommitDeposits"].(string); ok {
+			info.Miner.PreCommitDeposits = deposits
+		}
+		if vesting, ok := stateObj["VestingFunds"].(map[string]interface{}); ok {
+			if vestingFunds, ok := vesting["/"].(string); ok {
+				info.Miner.VestingFunds = vestingFunds
+			}
+		}
+	}
+}
+
+// Process faults from StateMinerFaults
+func (c *Client) processFaults(info *MinerInfo, faults interface{}) {
+	if faults == nil {
+		return
+	}
+
+	if faultArray, ok := faults.([]interface{}); ok {
+		// Count non-zero values as faults
+		faultCount := 0
+		for _, fault := range faultArray {
+			if val, ok := fault.(float64); ok && val != 0 {
+				faultCount++
+			}
+		}
+		info.Miner.Sectors.Faulty = uint64(faultCount)
+	}
+}
+
+// Process recoveries from StateMinerRecoveries
+func (c *Client) processRecoveries(info *MinerInfo, recoveries interface{}) {
+	if recoveries == nil {
+		return
+	}
+
+	if recoveryArray, ok := recoveries.([]interface{}); ok {
+		// Count non-zero values as recoveries
+		recoveryCount := 0
+		for _, recovery := range recoveryArray {
+			if val, ok := recovery.(float64); ok && val != 0 {
+				recoveryCount++
+			}
+		}
+		info.Miner.Sectors.Recovering = uint64(recoveryCount)
+	}
+}
+
+// Process active sectors from StateMinerActiveSectors
+func (c *Client) processActiveSectors(info *MinerInfo, active interface{}) {
+	if active == nil {
+		return
+	}
+
+	if sectors, ok := active.([]interface{}); ok {
+		activeSectors := uint64(len(sectors))
+		info.Miner.Sectors.Active = activeSectors
+		info.Miner.Sectors.Live = activeSectors
+	}
+}
+
+// BatchCall executes multiple RPC calls in a single request
+func (c *Client) BatchCall(ctx context.Context, requests []map[string]interface{}) ([]map[string]interface{}, error) {
+	if len(requests) == 0 {
+		return nil, fmt.Errorf("no requests in batch")
+	}
+
+	// Marshal requests
+	data, err := json.Marshal(requests)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal requests: %w", err)
+	}
+
+	// Create request
+	req, err := http.NewRequestWithContext(ctx, "POST", c.apiURL, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	// Send request
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Check status code
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Decode response
+	var responses []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&responses); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return responses, nil
+}
+
+// BatchCallWithRetry executes batch RPC calls with retry mechanism
+func (c *Client) BatchCallWithRetry(ctx context.Context, requests []map[string]interface{}) ([]map[string]interface{}, error) {
+	var lastErr error
+	for i := 0; i < 3; i++ {
+		responses, err := c.BatchCall(ctx, requests)
+		if err == nil {
+			return responses, nil
+		}
+		if !isRetryableError(err) {
+			return nil, err
+		}
+		lastErr = err
+		time.Sleep(time.Second * time.Duration(i+1))
+	}
+	return nil, fmt.Errorf("failed after 3 retries: %v", lastErr)
+}
+
+// isRetryableError determines if an error is retryable
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Network errors, timeouts, and 5xx status codes are retryable
+	if netErr, ok := err.(net.Error); ok {
+		return netErr.Temporary() || netErr.Timeout()
+	}
+
+	errStr := err.Error()
+	return strings.Contains(errStr, "connection refused") ||
+		strings.Contains(errStr, "no such host") ||
+		strings.Contains(errStr, "i/o timeout") ||
+		strings.Contains(errStr, "unexpected status code: 5")
+}
+
+// GetSectorInfo retrieves information about a specific sector
+func (c *Client) GetSectorInfo(ctx context.Context, minerID string, sectorNumber uint64) (*SectorInfo, error) {
+	var result SectorInfo
+	err := c.callRPCWithRetry(ctx, "Filecoin.StateSectorGetInfo", []interface{}{minerID, sectorNumber, nil}, &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sector info: %w", err)
+	}
+	return &result, nil
+}
+
+// ListSectors retrieves a list of sectors for a miner
+func (c *Client) ListSectors(ctx context.Context, minerID string) ([]uint64, error) {
+	var result []uint64
+	err := c.callRPCWithRetry(ctx, "Filecoin.StateMinerSectors", []interface{}{minerID, nil, nil}, &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list sectors: %w", err)
+	}
+	return result, nil
+}
+
+// GetSectorPenalty retrieves penalty information for a sector
+func (c *Client) GetSectorPenalty(ctx context.Context, minerID string, sectorNumber uint64) (*SectorPenalty, error) {
+	var result SectorPenalty
+	err := c.callRPCWithRetry(ctx, "Filecoin.StateSectorPenalty", []interface{}{minerID, sectorNumber, nil}, &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sector penalty: %w", err)
+	}
+	return &result, nil
+}
+
+// GetSectorVested retrieves vesting information for a sector
+func (c *Client) GetSectorVested(ctx context.Context, minerID string, sectorNumber uint64) (*SectorVested, error) {
+	var result SectorVested
+	err := c.callRPCWithRetry(ctx, "Filecoin.StateSectorVested", []interface{}{minerID, sectorNumber, nil}, &result)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sector vested: %w", err)
+	}
+	return &result, nil
 }

@@ -2,11 +2,11 @@ package sectors
 
 import (
 	"fmt"
+	"strconv"
 
 	"github.com/spf13/cobra"
 	"github.com/THCloudAI/thctl/internal/lotus"
-	"github.com/THCloudAI/thctl/internal/config"
-	"github.com/THCloudAI/thctl/internal/output"
+	"github.com/THCloudAI/thctl/pkg/output"
 )
 
 // VestedResult represents the vested funds result
@@ -25,75 +25,41 @@ func (r VestedResult) TableRow() []string {
 	return []string{r.MinerID, r.Vested}
 }
 
-func newVestedCmd() *cobra.Command {
+// NewVestedCmd creates a new vested command
+func NewVestedCmd() *cobra.Command {
 	var (
-		minerID    string
-		sectorNum  int
-		apiURL     string
-		authToken  string
+		minerID string
+		format  string
 	)
 
 	cmd := &cobra.Command{
-		Use:   "vested",
-		Short: "Get vested funds",
-		Long: `Get the total vested funds for a miner.
-
-Example:
-  thctl fil sectors vested --miner f01234 --sector 1`,
+		Use:   "vested [sector-id]",
+		Short: "Get sector vested funds",
+		Long:  "Get vested funds information for a specific sector",
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Load configuration
-			cfg, err := config.Load()
-			if err != nil {
-				return fmt.Errorf("failed to load configuration: %v", err)
-			}
-
-			// Get miner ID from flag
-			minerID := cmd.Flag("miner").Value.String()
-			if minerID == "" {
-				return fmt.Errorf("miner ID is required")
-			}
-
-			// Create Lotus client configuration
-			clientConfig := lotus.Config{
-				APIURL:    cfg.Lotus.APIURL,
-				AuthToken: cfg.Lotus.AuthToken,
-			}
-
-			// Override with command line flags
-			if apiURL != "" {
-				clientConfig.APIURL = apiURL
-			}
-			if authToken != "" {
-				clientConfig.AuthToken = authToken
-			}
-
 			// Create Lotus client
-			client := lotus.New(clientConfig)
-
-			// Get vested funds
-			ctx := cmd.Context()
-
-			// Get sector ID from flag
-			sectorID, err := cmd.Flags().GetInt64("sector")
+			client, err := lotus.NewFromEnv()
 			if err != nil {
-				return fmt.Errorf("failed to get sector ID: %v", err)
+				return fmt.Errorf("failed to create Lotus client: %v", err)
 			}
 
-			vested, err := client.GetSectorVested(ctx, minerID, sectorID)
+			// Parse sector ID
+			sectorID, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				return fmt.Errorf("failed to parse sector ID: %v", err)
+			}
+
+			// Get sector vested info
+			sectorNumber := uint64(sectorID)
+			vested, err := client.GetSectorVested(cmd.Context(), minerID, sectorNumber)
 			if err != nil {
 				return fmt.Errorf("failed to get vested funds: %v", err)
 			}
 
-			// Get output format
-			format := output.Format("table")
-			if !format.IsValid() {
-				format = output.FormatTable
-			}
-
-			// Print result
-			printer := output.NewPrinter(format)
-			if err := printer.Print(vested); err != nil {
-				return fmt.Errorf("failed to print result: %v", err)
+			// Print output
+			if err := output.Print(vested, output.Format(format)); err != nil {
+				return fmt.Errorf("failed to print output: %v", err)
 			}
 
 			return nil
@@ -101,14 +67,11 @@ Example:
 	}
 
 	// Add flags
-	cmd.Flags().StringVar(&minerID, "miner", "", "Miner ID (required)")
-	cmd.Flags().IntVar(&sectorNum, "sector", 0, "Sector number (required)")
-	cmd.Flags().StringVar(&apiURL, "api-url", "", "Lotus API URL (overrides config)")
-	cmd.Flags().StringVar(&authToken, "auth-token", "", "Lotus API token (overrides config)")
+	cmd.Flags().StringVarP(&minerID, "miner", "m", "", "Miner ID (required)")
+	cmd.Flags().StringVarP(&format, "format", "f", "json", "Output format (json|yaml|table)")
 
 	// Mark required flags
 	cmd.MarkFlagRequired("miner")
-	cmd.MarkFlagRequired("sector")
 
 	return cmd
 }
