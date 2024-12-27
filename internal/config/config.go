@@ -56,6 +56,7 @@ func Load() (cfg *Config, err error) {
         config = &Config{}
 
         // Try to load from .thctl.env file in the current directory
+        fmt.Printf("Trying to load .thctl.env from current directory...\n")
         err = godotenv.Load(".thctl.env")
         if err != nil && !os.IsNotExist(err) {
             err = fmt.Errorf("failed to load .thctl.env file: %v", err)
@@ -64,8 +65,10 @@ func Load() (cfg *Config, err error) {
 
         // If not found in current directory, try home directory
         if os.IsNotExist(err) {
-            if home, homeErr := os.UserHomeDir(); homeErr == nil {
+            home, homeErr := os.UserHomeDir()
+            if homeErr == nil {
                 envFile := filepath.Join(home, ".thctl.env")
+                fmt.Printf("Trying to load .thctl.env from home directory: %s\n", envFile)
                 err = godotenv.Load(envFile)
                 if err != nil && !os.IsNotExist(err) {
                     err = fmt.Errorf("failed to load home directory .thctl.env file: %v", err)
@@ -80,6 +83,8 @@ func Load() (cfg *Config, err error) {
         config.Lotus.Timeout = getDurationEnvWithDefault("LOTUS_API_TIMEOUT", 30*time.Second)
         config.THCloud.APIKey = getEnvWithDefault("THCLOUD_API_KEY", "")
 
+        fmt.Printf("Loaded config: LOTUS_API_URL=%s\n", config.Lotus.APIURL)
+
         // Clear error if we successfully loaded the config
         err = nil
     })
@@ -93,18 +98,22 @@ func Load() (cfg *Config, err error) {
 
 // getEnvWithDefault returns the value of an environment variable or a default value
 func getEnvWithDefault(key, defaultValue string) string {
-    if value := os.Getenv(key); value != "" {
-        return value
+    value := os.Getenv(key)
+    if value == "" {
+        return defaultValue
     }
-    return defaultValue
+    return value
 }
 
 // getDurationEnvWithDefault returns the duration value of an environment variable or a default value
 func getDurationEnvWithDefault(key string, defaultValue time.Duration) time.Duration {
-    if value := os.Getenv(key); value != "" {
-        if duration, err := time.ParseDuration(value); err == nil {
-            return duration
-        }
+    value := os.Getenv(key)
+    if value == "" {
+        return defaultValue
     }
-    return defaultValue
+    duration, err := time.ParseDuration(value)
+    if err != nil {
+        return defaultValue
+    }
+    return duration
 }

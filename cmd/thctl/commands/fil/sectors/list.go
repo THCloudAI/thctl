@@ -5,93 +5,59 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/THCloudAI/thctl/internal/lotus"
-	"github.com/THCloudAI/thctl/internal/config"
-	"github.com/THCloudAI/thctl/internal/output"
+	"github.com/THCloudAI/thctl/pkg/output"
 )
 
-// ListResult represents the sector list result
+// ListResult represents the result of listing sectors
 type ListResult struct {
-	MinerID string                   `json:"miner_id" yaml:"miner_id"`
-	Sectors []map[string]interface{} `json:"sectors" yaml:"sectors"`
+	MinerID string                   `json:"minerId"`
+	Sectors []map[string]interface{} `json:"sectors"`
 }
 
-// TableHeaders returns the headers for table output
-func (r ListResult) TableHeaders() []string {
-	return []string{"Miner ID", "Sector ID", "State", "Sealed CID", "Deal Count"}
-}
-
-// TableRow returns the row data for table output
-func (r ListResult) TableRow() []string {
-	rows := make([][]string, 0, len(r.Sectors))
-	for _, sector := range r.Sectors {
-		dealIDs, _ := sector["deal_ids"].([]uint64)
-		rows = append(rows, []string{
-			r.MinerID,
-			fmt.Sprintf("%d", sector["sector_id"].(uint64)),
-			sector["state"].(string),
-			sector["sealed_cid"].(string),
-			fmt.Sprintf("%d", len(dealIDs)),
-		})
-	}
-	return rows[0] // output.Printer will handle multiple rows
-}
-
-func newListCmd() *cobra.Command {
+// NewListCmd creates a new list command
+func NewListCmd() *cobra.Command {
 	var (
-		minerID    string
-		apiURL     string
-		authToken  string
+		minerID string
+		format  string
 	)
 
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List all sectors",
-		Long: `List all sectors for a miner.
-
-Example:
-  thctl fil sectors list --miner f01234`,
+		Short: "List sectors for a miner",
+		Long:  "List all sectors for a specified miner",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Load configuration
-			cfg, err := config.Load()
-			if err != nil {
-				return fmt.Errorf("failed to load configuration: %v", err)
-			}
-
-			// Get miner ID from flag
-			minerID := cmd.Flag("miner").Value.String()
-			if minerID == "" {
-				return fmt.Errorf("miner ID is required")
-			}
-
 			// Create Lotus client
-			client := lotus.New(lotus.Config{
-				APIURL:    cfg.Lotus.APIURL,
-				AuthToken: cfg.Lotus.AuthToken,
-			})
+			client, err := lotus.NewFromEnv()
+			if err != nil {
+				return fmt.Errorf("failed to create Lotus client: %v", err)
+			}
+
+			// Get context
+			ctx := cmd.Context()
 
 			// List sectors
-			ctx := cmd.Context()
 			sectors, err := client.ListSectors(ctx, minerID)
 			if err != nil {
 				return fmt.Errorf("failed to list sectors: %v", err)
 			}
 
+			// Convert []uint64 to []map[string]interface{}
+			sectorMaps := make([]map[string]interface{}, len(sectors))
+			for i, sector := range sectors {
+				sectorMaps[i] = map[string]interface{}{
+					"sectorNumber": sector,
+				}
+			}
+
 			// Create result
 			result := ListResult{
 				MinerID: minerID,
-				Sectors: sectors,
+				Sectors: sectorMaps,
 			}
 
-			// Get output format
-			format := output.Format("table")
-			if !format.IsValid() {
-				format = output.FormatTable
-			}
-
-			// Print result
-			printer := output.NewPrinter(format)
-			if err := printer.Print(result); err != nil {
-				return fmt.Errorf("failed to print result: %v", err)
+			// Print output
+			if err := output.Print(result, output.Format(format)); err != nil {
+				return fmt.Errorf("failed to print output: %v", err)
 			}
 
 			return nil
@@ -99,9 +65,8 @@ Example:
 	}
 
 	// Add flags
-	cmd.Flags().StringVar(&minerID, "miner", "", "Miner ID (required)")
-	cmd.Flags().StringVar(&apiURL, "api-url", "", "Lotus API URL (overrides config)")
-	cmd.Flags().StringVar(&authToken, "auth-token", "", "Lotus API token (overrides config)")
+	cmd.Flags().StringVarP(&minerID, "miner", "m", "", "Miner ID (required)")
+	cmd.Flags().StringVarP(&format, "format", "f", "json", "Output format (json|yaml|table)")
 
 	// Mark required flags
 	cmd.MarkFlagRequired("miner")
